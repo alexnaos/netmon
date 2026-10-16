@@ -1,0 +1,448 @@
+<!doctype html>
+<html lang="ru">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>RadMonitor — локальная карта сети</title>
+<style>
+  * { box-sizing: border-box; }
+  body { font-family: system-ui, -apple-system, Segoe UI, Roboto, Arial, sans-serif; margin: 0; background: #f5f7fa; color: #222; }
+  header { background: #1f2937; color: #fff; padding: 1rem 1.5rem; display: flex; justify-content: space-between; align-items: center; flex-wrap: wrap; gap: 0.5rem; }
+  h1 { margin: 0; font-size: 1.25rem; }
+  .badge { display: inline-block; padding: 0.15rem 0.6rem; border-radius: 999px; background: #374151; color: #e5e7eb; font-size: 0.8rem; margin-left: 0.5rem; }
+  .toolbar { background: #fff; border-bottom: 1px solid #e5e7eb; padding: 0.75rem 1.5rem; display: flex; gap: 0.5rem; align-items: center; flex-wrap: wrap; }
+  button { background: #2563eb; color: #fff; border: none; padding: 0.5rem 1rem; border-radius: 6px; cursor: pointer; font-size: 0.9rem; }
+  button:hover { background: #1d4ed8; }
+  button.secondary { background: #6b7280; }
+  button.secondary:hover { background: #4b5563; }
+  .poller { font-size: 0.8rem; color: #6b7280; margin-left: auto; }
+  .grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(260px, 1fr)); gap: 1rem; padding: 1.5rem; }
+  .tile { background: #fff; border: 1px solid #e5e7eb; border-radius: 10px; padding: 1rem; cursor: pointer; transition: transform .12s, box-shadow .12s; display: flex; flex-direction: column; gap: 0.5rem; }
+  .tile:hover { transform: translateY(-2px); box-shadow: 0 4px 12px rgba(0,0,0,.08); border-color: #2563eb; }
+  .tile .ip { font-weight: 700; font-size: 1.1rem; color: #111827; }
+  .tile .mac { font-size: 0.85rem; color: #6b7280; font-family: ui-monospace, SFMono-Regular, monospace; }
+  .tile .category { font-size: 0.8rem; text-transform: uppercase; letter-spacing: 0.05em; color: #6b7280; }
+  .status { display: inline-flex; align-items: center; gap: 0.4rem; font-size: 0.85rem; font-weight: 600; margin-top: 0.25rem; }
+  .status-dot { width: 8px; height: 8px; border-radius: 50%; }
+  .status-online .status-dot { background: #16a34a; box-shadow: 0 0 6px #16a34a; }
+  .status-offline .status-dot { background: #ef4444; }
+  .status-warning .status-dot { background: #ca8a04; }
+  .stats { font-size: 0.8rem; color: #4b5563; margin-top: auto; border-top: 1px solid #f3f4f6; padding-top: 0.5rem; }
+  .rtt { font-size: 0.8rem; font-family: ui-monospace, monospace; color: #374151; }
+  .hint { font-size: 0.75rem; color: #9ca3af; font-style: italic; margin-top: 0.25rem; }
+  .empty { grid-column: 1 / -1; text-align: center; color: #6b7280; padding: 3rem; }
+  .modal { display: none; position: fixed; inset: 0; background: rgba(0,0,0,.5); justify-content: center; align-items: center; z-index: 50; }
+  .modal.open { display: flex; }
+  .modal-content { background: #fff; border-radius: 10px; width: 90%; max-width: 520px; max-height: 85vh; overflow: auto; box-shadow: 0 20px 60px rgba(0,0,0,.3); }
+  .modal-header { padding: 1rem 1.25rem; border-bottom: 1px solid #e5e7eb; display: flex; justify-content: space-between; align-items: center; }
+  .modal-body { padding: 1.25rem; }
+  .modal-close { background: transparent; border: none; font-size: 1.5rem; cursor: pointer; color: #6b7280; line-height: 1; }
+  .kv { margin: 0.5rem 0; font-size: 0.9rem; }
+  .kv kbd { font-weight: 700; color: #111827; }
+  .kv .val { color: #4b5563; }
+  .btn-open { margin-top: 1rem; background: #16a34a; }
+  .btn-open:hover { background: #15803d; }
+  .note { font-size: 0.8rem; color: #6b7280; margin-top: 0.5rem; border-top: 1px solid #f3f4f6; padding-top: 0.5rem; }
+  .services { margin-top: 1rem; }
+  .services h3 { font-size: 0.9rem; margin: 0 0 0.5rem 0; color: #374151; text-transform: uppercase; letter-spacing: 0.05em; border-bottom: 1px solid #f3f4f6; padding-bottom: 0.25rem; }
+  .service-list { display: flex; flex-direction: column; gap: 0.4rem; }
+  .service-item { display: flex; align-items: center; gap: 0.5rem; padding: 0.5rem; background: #f9fafb; border: 1px solid #e5e7eb; border-radius: 6px; cursor: pointer; transition: background .1s; }
+  .service-item:hover { background: #eff6ff; border-color: #2563eb; }
+  .service-badge { display: inline-flex; align-items: center; gap: 0.25rem; font-size: 0.7rem; font-weight: 700; text-transform: uppercase; letter-spacing: 0.04em; padding: 0.15rem 0.4rem; border-radius: 4px; }
+  .service-badge.http { background: #dbeafe; color: #1e40af; }
+  .service-badge.https { background: #dcfce7; color: #166534; }
+  .service-badge.mqtt { background: #fce7f3; color: #9d174d; }
+  .service-badge.ssh { background: #fef3c7; color: #92400e; }
+  .service-badge.smb { background: #e0e7ff; color: #4338ca; }
+  .service-badge.rtsp { background: #fce7f3; color: #9d174d; }
+  .service-badge.rdp { background: #ede9fe; color: #6d28d9; }
+  .service-badge.dns { background: #ccfbf1; color: #115e59; }
+  .service-badge.custom { background: #f3f4f6; color: #374151; }
+  .service-info { flex: 1; min-width: 0; }
+  .service-name { font-weight: 600; font-size: 0.85rem; color: #111827; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  .service-desc { font-size: 0.75rem; color: #6b7280; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  .service-port { font-size: 0.7rem; font-family: ui-monospace, monospace; color: #9ca3af; margin-left: auto; }
+  .service-url { font-size: 0.75rem; color: #2563eb; margin-left: auto; margin-right: 0.5rem; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; max-width: 150px; }
+  .no-services { font-size: 0.8rem; color: #9ca3af; font-style: italic; margin-top: 0.5rem; }
+  .conn { font-size: 0.75rem; display: flex; align-items: center; gap: 0.3rem; margin-top: 0.25rem; color: #6b7280; }
+  .conn-icon { font-size: 1rem; }
+  .conn-icon.wifi { color: #2563eb; }
+  .conn-icon.wired { color: #16a34a; }
+  .loading { text-align: center; padding: 2rem; color: #6b7280; }
+
+  /* Топология сети — дерево */
+  #topology-overlay { display: none; position: fixed; inset: 0; background: rgba(0,0,0,.6); justify-content: center; align-items: center; z-index: 100; }
+  #topology-overlay.open { display: flex; }
+  #topology-panel { background: #fff; border-radius: 10px; width: 95vw; height: 90vh; max-width: 1200px; max-height: 800px; box-shadow: 0 20px 60px rgba(0,0,0,.3); display: flex; flex-direction: column; overflow: hidden; position: relative; }
+  #topology-header { padding: 1rem 1.25rem; border-bottom: 1px solid #e5e7eb; display: flex; justify-content: space-between; align-items: center; background: #f8fafc; }
+  #topology-header h3 { margin: 0; font-size: 1rem; color: #111827; }
+  #topology-close { background: transparent; border: none; font-size: 1.5rem; cursor: pointer; color: #6b7280; line-height: 1; padding: 0 0.5rem; }
+  #topology-tree-wrap { flex: 1; overflow: auto; background: #f3f4f6; padding: 1rem; }
+  #topology-tree { font-family: ui-monospace, SFMono-Regular, monospace; font-size: 0.85rem; line-height: 1.6; color: #111827; }
+
+  .tree-node { cursor: pointer; display: flex; align-items: center; gap: 0.5rem; padding: 0.25rem 0.5rem; border-radius: 6px; transition: background .15s; white-space: nowrap; }
+  .tree-node:hover { background: #e5edff; }
+  .tree-node.selected { background: #dbeafe; font-weight: 700; border: 1px solid #2563eb; }
+  .tree-node.root { font-weight: 800; color: #111827; background: #f0fdf4; border: 1px solid #16a34a; }
+
+  .tree-branch { position: relative; padding-left: 1.6rem; }
+  .tree-branch::before { content: ''; position: absolute; left: 0.8rem; top: 0; bottom: 0; border-left: 1px solid #cbd5e1; }
+  .tree-branch:last-child::before { bottom: 1.2rem; }
+
+  .tree-conn { display: inline-flex; align-items: center; gap: 0.3rem; font-size: 0.7rem; margin-left: 0.5rem; }
+  .tree-conn.wired { color: #16a34a; }
+  .tree-conn.wifi { color: #2563eb; }
+
+  .tree-conn-icon { font-size: 0.8rem; }
+  .tree-conn.wired .tree-conn-icon { color: #16a34a; }
+  .tree-conn.wifi .tree-conn-icon { color: #2563eb; }
+
+  .tree-status { font-size: 0.7rem; margin-left: auto; padding: 0.1rem 0.4rem; border-radius: 4px; }
+  .tree-status.online { background: #dcfce7; color: #166534; }
+  .tree-status.offline { background: #fee2e2; color: #991b1b; }
+  .tree-status.warning { background: #fef3c7; color: #92400e; }
+  .tree-status.unknown { background: #e5e7eb; color: #374151; }
+</style>
+</head>
+<body>
+<header>
+  <div>
+    <h1>📡 RadMonitor — карта сети</h1>
+    <div class="badge" id="subnet-badge"></div>
+  </div>
+  <div class="poller" id="poller-status">Готово</div>
+</header>
+<div class="toolbar">
+  <button id="btn-refresh">Обновить сейчас</button>
+  <button class="secondary" id="btn-scan">Полное сканирование</button>
+  <button class="secondary" id="btn-topology">Топология сети</button>
+  <div class="poller" id="alive-info">Устройств: —</div>
+</div>
+<div class="grid" id="grid"></div>
+<div class="empty" id="empty" style="display:none">Устройства не найдены.</div>
+
+<div class="modal" id="modal">
+  <div class="modal-content">
+    <div class="modal-header">
+      <strong id="modal-title">Детали устройства</strong>
+      <button class="modal-close" id="btn-close">&times;</button>
+    </div>
+    <div class="modal-body" id="modal-body"></div>
+    <button class="btn-open" id="btn-open">Открыть веб-интерфейс устройства</button>
+  </div>
+</div>
+
+<div id="topology-overlay">
+  <div id="topology-panel">
+    <div id="topology-header">
+      <h3>Топология сети — дерево устройств</h3>
+      <button id="topology-close">&times;</button>
+    </div>
+    <div id="topology-tree-wrap">
+      <div id="topology-tree"></div>
+    </div>
+  </div>
+</div>
+
+<script>
+const API_INFO = '/api/network/info';
+const API_SCAN = '/api/network/scan';
+const API_TOPOLOGY = '/api/network/topology';
+const API_BASE = '';
+const POLL_MS = 10000;
+
+const grid = document.getElementById('grid');
+const empty = document.getElementById('empty');
+const statusEl = document.getElementById('poller-status');
+const aliveEl = document.getElementById('alive-info');
+const subnetBadge = document.getElementById('subnet-badge');
+const btnRefresh = document.getElementById('btn-refresh');
+const btnScan = document.getElementById('btn-scan');
+const btnTopology = document.getElementById('btn-topology');
+
+const topologyOverlay = document.getElementById('topology-overlay');
+const topologyPanel = document.getElementById('topology-panel');
+const topologyClose = document.getElementById('topology-close');
+const topologyTree = document.getElementById('topology-tree');
+
+const modal = document.getElementById('modal');
+const modalTitle = document.getElementById('modal-title');
+const modalBody = document.getElementById('modal-body');
+const btnClose = document.getElementById('btn-close');
+const btnOpen = document.getElementById('btn-open');
+
+let selectedDevice = null;
+
+btnTopology.onclick = async () => {
+  try {
+    const r = await fetch(API_TOPOLOGY, { cache: 'no-store' });
+    if (!r.ok) throw new Error('HTTP ' + r.status);
+    const data = await r.json();
+    drawTopology(data.devices, data.connections);
+    topologyOverlay.classList.add('open');
+  } catch (e) {
+    setStatus('Ошибка топологии: ' + escapeHtml(e.message));
+  }
+};
+
+topologyClose.onclick = () => { topologyOverlay.classList.remove('open'); };
+topologyOverlay.onclick = (e) => { if (e.target === topologyOverlay) topologyOverlay.classList.remove('open'); };
+
+function drawTopology(devices, connections) {
+  const byIp = {};
+  for (const d of devices) byIp[d.ip] = d;
+
+  // Построить adjacency list из соединений (неориентированный граф)
+  const adj = {};
+  for (const c of connections) {
+    if (!adj[c.from]) adj[c.from] = [];
+    if (!adj[c.to]) adj[c.to] = [];
+    adj[c.from].push({ to: c.to, type: c.type || 'wired' });
+    adj[c.to].push({ to: c.from, type: c.type || 'wired' });
+  }
+
+  const rootIp = '192.168.1.1';
+  const visited = new Set();
+
+  // Рекурсивно построить дерево: { ip, children: [{ip, type, children...}] }
+  function buildTree(ip, parentIp) {
+    visited.add(ip);
+    const d = byIp[ip];
+    const children = [];
+    const links = (adj[ip] || []).filter(l => l.to !== parentIp && !visited.has(l.to));
+    for (const link of links) {
+      visited.add(link.to);
+      children.push({
+        ip: link.to,
+        type: link.type || 'wired',
+        children: buildTree(link.to, ip).children
+      });
+    }
+    return { ip, device: d, children };
+  }
+
+  const tree = buildTree(rootIp, null);
+
+  // Рендер узла в HTML
+  function renderNode(node, isLast, depth) {
+    const d = node.device;
+    const ip = node.ip;
+    const status = d ? (d.status || 'unknown') : 'unknown';
+    const name = d ? (d.name || ip) : ip;
+    const isRoot = ip === rootIp;
+
+    const connCls = node.type === 'wifi' ? 'wifi' : 'wired';
+    const connIcon = node.type === 'wifi' ? '📶' : '🔌';
+    const statusCls = status === 'online' ? 'online' : (status === 'offline' ? 'offline' : (status === 'warning' ? 'warning' : 'unknown'));
+
+    let html = '';
+    // Connector line prefix (├── or └──)
+    if (!isRoot) {
+      const connector = isLast ? '└── ' : '├── ';
+      html += '<span class="tree-connector">' + connector + '</span>';
+    }
+    // Node
+    const nodeCls = 'tree-node' + (isRoot ? ' root' : '');
+    html += '<div class="' + nodeCls + '" data-ip="' + escapeHtml(ip) + '">';
+    html += (isRoot ? '📡 ' : '') + escapeHtml(name) + ' <span class="ip">' + escapeHtml(ip) + '</span>';
+    if (!isRoot) {
+      html += ' <span class="tree-conn ' + connCls + '"><span class="tree-conn-icon">' + connIcon + '</span>' + (node.type === 'wifi' ? 'Wi-Fi' : 'Провод') + '</span>';
+    }
+    html += ' <span class="tree-status ' + statusCls + '">' + status + '</span>';
+    html += '</div>';
+
+    // Children branch
+    if (node.children && node.children.length > 0) {
+      html += '<div class="tree-branch' + (isLast ? '' : '') + '">';
+      node.children.forEach((child, idx) => {
+        html += renderNode(child, idx === node.children.length - 1, depth + 1);
+      });
+      html += '</div>';
+    }
+
+    return html;
+  }
+
+  // Собрать всё дерево
+  topologyTree.innerHTML = '';
+  const rootHtml = renderNode(tree, true, 0);
+  // wrap root in branch container for children lines
+  let treeHtml = '<div class="tree-node root" data-ip="' + escapeHtml(tree.ip) + '">';
+  treeHtml += '📡 ' + escapeHtml(tree.device ? (tree.device.name || tree.ip) : tree.ip) + ' <span class="ip">' + escapeHtml(tree.ip) + '</span>';
+  treeHtml += ' <span class="tree-status ' + (tree.device ? (tree.device.status === 'online' ? 'online' : (tree.device.status === 'offline' ? 'offline' : (tree.device.status === 'warning' ? 'warning' : 'unknown'))) : 'unknown') + '">' + escapeHtml(tree.device ? tree.device.status : 'unknown') + '</span>';
+  treeHtml += '</div>';
+  if (tree.children && tree.children.length > 0) {
+    treeHtml += '<div class="tree-branch">';
+    tree.children.forEach((child, idx) => {
+      treeHtml += renderNode(child, idx === tree.children.length - 1, 1);
+    });
+    treeHtml += '</div>';
+  }
+  topologyTree.innerHTML = treeHtml;
+
+  // Назначить клики по узлам
+  topologyTree.querySelectorAll('.tree-node').forEach(el => {
+    el.onclick = (e) => {
+      e.stopPropagation();
+      topologyTree.querySelectorAll('.tree-node').forEach(n => n.classList.remove('selected'));
+      el.classList.add('selected');
+      const ip = el.dataset.ip;
+      const d = byIp[ip];
+      setStatus(ip + ' — ' + (d ? (d.name || '') : '') + ' · ' + (d ? (d.connection_type || '—') : '—'));
+    };
+  });
+}
+
+function setStatus(txt) { statusEl.textContent = txt; }
+function escapeHtml(t){ return String(t===''||t==null?'':t).replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":"&#39;"}[c])); }
+function escapeJs(t){ return String(t===''||t==null?'':t).replace(/['\\]/g, '\\$&'); }
+
+function render(data) {
+  grid.innerHTML = '';
+  const devices = (data.devices || []).filter(d => d.status !== 'offline');
+  if (!devices.length) { empty.style.display = 'block'; grid.style.display = 'none'; return; }
+  empty.style.display = 'none'; grid.style.display = 'grid';
+
+  for (const d of devices) {
+    const tile = document.createElement('article');
+    tile.className = 'tile status-' + (d.status || 'offline');
+    const hint = d.detail_hint || ('http://' + d.ip);
+    const rtt = d.ping_rtt !== null && d.ping_rtt !== undefined ? d.ping_rtt + ' ms' : '—';
+    const ttl = d.ttl !== null && d.ttl !== undefined ? d.ttl : '—';
+    const ports = d.ports ? (Array.isArray(d.ports) ? d.ports.join(', ') : String(d.ports)) : '—';
+
+    tile.innerHTML = `
+      <div class="ip">${escapeHtml(d.ip)}</div>
+      <div class="mac">${escapeHtml(d.mac || '—')}</div>
+      <div class="conn"><span class="conn-icon ${d.connection_type === 'wifi' ? 'wifi' : 'wired'}" title="${d.connection_type === 'wifi' ? 'Wi-Fi' : 'Ethernet'}">${d.connection_type === 'wifi' ? '📶' : '🔌'}</span> ${escapeHtml(d.connection_type === 'wifi' ? 'Wi-Fi' : 'Провод')}</div>
+      <div class="category">${escapeHtml(d.category || '—')}</div>
+      <div class="status">
+        <span class="status-dot"></span>
+        ${escapeHtml(d.status || 'unknown')}
+      </div>
+      <div class="rtt">Ping: <span>${rtt}</span> · TTL: ${ttl}</div>
+      <div class="stats">Порты: ${escapeHtml(ports)}</div>
+      <div class="hint">Открыть: ${escapeHtml(hint)}</div>
+    `;
+    tile.onclick = () => openDetail(d, hint);
+    grid.appendChild(tile);
+  }
+
+  if (data.alive !== undefined && data.elapsed_sec !== undefined) {
+    aliveEl.textContent = 'Найдено живых: ' + data.alive + ' из ' + data.total_hosts + ' · ' + data.elapsed_sec + ' сек';
+  } else {
+    aliveEl.textContent = 'Устройств: ' + devices.length + (data.alive !== undefined ? ' (живых: ' + data.alive + ')' : '');
+  }
+  if (data.mask) subnetBadge.textContent = data.mask;
+}
+
+async function openDetail(d, hint) {
+  selectedDevice = d;
+  modalTitle.textContent = 'Устройство ' + escapeHtml(d.ip);
+  let html = '';
+  html += '<div class="kv"><kbd>IP</kbd><span class="val">' + escapeHtml(d.ip) + '</span></div>';
+  if (d.hostname) html += '<div class="kv"><kbd>Имя (сканер)</kbd><span class="val">' + escapeHtml(d.hostname) + '</span></div>';
+  if (d.vendor) html += '<div class="kv"><kbd>Производитель</kbd><span class="val">' + escapeHtml(d.vendor) + '</span></div>';
+  html += '<div class="kv"><kbd>MAC</kbd><span class="val">' + escapeHtml(d.mac || '—') + '</span></div>';
+  html += '<div class="kv"><kbd>Категория</kbd><span class="val">' + escapeHtml(d.category || '—') + '</span></div>';
+  html += '<div class="kv"><kbd>Статус</kbd><span class="val">' + escapeHtml(d.status || '—') + '</span></div>';
+  if (d.ping_rtt !== null && d.ping_rtt !== undefined) html += '<div class="kv"><kbd>Ping RTT</kbd><span class="val">' + d.ping_rtt + ' мс</span></div>';
+  if (d.ttl !== null && d.ttl !== undefined) html += '<div class="kv"><kbd>TTL</kbd><span class="val">' + d.ttl + '</span></div>';
+  if (d.ports) html += '<div class="kv"><kbd>Порты</kbd><span class="val">' + escapeHtml(Array.isArray(d.ports) ? d.ports.join(', ') : String(d.ports)) + '</span></div>';
+  if (d.detail_type) html += '<div class="kv"><kbd>Тип деталей</kbd><span class="val">' + escapeHtml(d.detail_type) + '</span></div>';
+  if (d.detail_hint) html += '<div class="kv"><kbd>Ссылка</kbd><span class="val">' + escapeHtml(d.detail_hint) + '</span></div>';
+  if (d.notes) html += '<div class="kv"><kbd>Заметки</kbd><span class="val">' + escapeHtml(d.notes) + '</span></div>';
+
+  // Загружаем и отображаем сервисы устройства
+  try {
+    const r = await fetch(API_BASE + '/api/device/' + d.ip + '/services', { cache: 'no-store' });
+    if (r.ok) {
+      const sdata = await r.json();
+      const services = sdata.services || [];
+      if (services.length > 0) {
+        html += '<div class="services"><h3>Сервисы (' + services.length + ')</h3><div class="service-list">';
+        for (const svc of services) {
+          const badgeType = svc.type || 'custom';
+          const urlHtml = svc.url && (svc.type === 'http' || svc.type === 'https')
+            ? '<span class="service-url" title="' + escapeHtml(svc.url) + '">' + escapeHtml(svc.url) + '</span>'
+            : (svc.url ? '<span class="service-port">' + escapeHtml(svc.url) + '</span>' : '<span class="service-port">:' + svc.port + '</span>');
+          html += '<div class="service-item" onclick="event.stopPropagation(); openServiceUrl(\'' + escapeJs(svc.url) + '\', \'' + escapeJs(svc.type) + '\');">';
+          html += '<span class="service-badge ' + badgeType + '">' + badgeType.toUpperCase() + '</span>';
+          html += '<div class="service-info"><div class="service-name" title="' + escapeHtml(svc.name) + '">' + escapeHtml(svc.name) + '</div><div class="service-desc" title="' + escapeHtml(svc.desc) + '">' + escapeHtml(svc.desc) + '</div></div>';
+          html += urlHtml;
+          html += '</div>';
+        }
+        html += '</div></div>';
+      } else {
+        html += '<div class="no-services">Сервисы не обнаружены</div>';
+      }
+    }
+  } catch (e) {
+    // тихо игнорируем ошибку загрузки сервисов
+  }
+
+  modalBody.innerHTML = html;
+  btnOpen.onclick = () => { if (hint) window.open(hint, '_blank'); };
+  modal.classList.add('open');
+}
+
+function openServiceUrl(url, type) {
+  if (!url) return;
+  let target = url;
+  if (type === 'ssh' || type === 'rdp') {
+    // для ssh/rdp просто показываем, нельзя открыть в браузере напрямую
+    alert('Подключение: ' + url + '\n(используйте соответствующий клиент)');
+    return;
+  }
+  if (type === 'smb') {
+    alert('SMB ресурс: ' + url + '\n(откройте в проводнике файлов)');
+    return;
+  }
+  if (type === 'mqtt') {
+    alert('MQTT: ' + url + '\n(используйте MQTT клиент)');
+    return;
+  }
+  if (type === 'dns' || type === 'custom') {
+    alert('Адрес: ' + url);
+    return;
+  }
+  window.open(target, '_blank');
+}
+
+function closeModal() { modal.classList.remove('open'); selectedDevice = null; }
+btnClose.onclick = closeModal;
+modal.onclick = (e) => { if (e.target === modal) closeModal(); };
+
+async function fetchInfo() {
+  setStatus('Обновление…');
+  try {
+    const r = await fetch(API_INFO, { cache: 'no-store' });
+    if (!r.ok) throw new Error('HTTP ' + r.status);
+    const data = await r.json();
+    render(data);
+    setStatus('Обновлено ' + new Date().toLocaleTimeString([], {hour:'2-digit', minute:'2-digit', second:'2-digit'}));
+  } catch (e) {
+    setStatus('Ошибка: ' + escapeHtml(e.message));
+  }
+}
+
+async function fullScan() {
+  setStatus('Сканирование сети… (~10 сек)');
+  try {
+    const r = await fetch(API_SCAN, { method: 'GET', cache: 'no-store' });
+    if (!r.ok) throw new Error('HTTP ' + r.status);
+    const data = await r.json();
+    render(data);
+    setStatus('✅ ' + data.summary + ' · ' + new Date().toLocaleTimeString([], {hour:'2-digit', minute:'2-digit', second:'2-digit'}));
+  } catch (e) {
+    setStatus('Ошибка сканирования: ' + escapeHtml(e.message));
+  }
+}
+
+btnRefresh.onclick = fetchInfo;
+btnScan.onclick = fullScan;
+
+fullScan();
+</script>
+</body>
+</html>
