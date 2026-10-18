@@ -52,6 +52,76 @@ latest_status = {
 _lock = threading.Lock()
 
 
+def _merge_multi_ip(entries):
+    """Схлопывает карточки одного физхоста (несколько IP одного MAC) в одну.
+
+    Группы заданы в nd.MULTI_IP_GROUPS (primary + aliases). Итоговая карточка
+    несёт ip = primary, active_ip — какой интерфейс живёт прямо сейчас, и ips —
+    статус каждого адреса группы. Независимые записи проходят без изменений.
+    """
+    by_ip = {e.get("ip"): e for e in entries}
+    consumed = set()
+    out = []
+
+    def _alive(ent):
+        return ent is not None and ent.get("status", "online") not in ("offline", "unknown")
+
+    for e in entries:
+        ip = e.get("ip")
+        if ip in consumed:
+            continue
+        grp = nd.MULTI_IP_MAP.get(ip)
+        if not grp:
+            out.append(e)
+            continue
+
+        group_ips = [grp["primary"]] + list(grp.get("aliases") or [])
+        members = []
+        for gip in group_ips:
+            ent = by_ip.get(gip)
+            if ent is not None:
+                consumed.add(gip)
+            members.append({
+                "ip": gip,
+                "alive": _alive(ent),
+                "ping_rtt": ent.get("ping_rtt") if ent is not None else None,
+            })
+
+        present = [by_ip[gip] for gip in group_ips if gip in by_ip]
+        base = dict(by_ip[grp["primary"]] if grp["primary"] in by_ip else present[0])
+
+        alive_ips = [m["ip"] for m in members if m["alive"]]
+        active_ip = alive_ips[0] if alive_ips else None
+        if active_ip is not None:
+            base["ping_rtt"] = by_ip[active_ip].get("ping_rtt")
+
+        # открытые порты одного хоста — объединение по всем записям группы
+        ports_lists = [e2.get("ports") for e2 in present
+                       if isinstance(e2.get("ports"), list)]
+        if ports_lists:
+            base["ports"] = sorted({p for pl in ports_lists for p in pl})
+
+        if base.get("status") != "warning":
+            base["status"] = "online" if alive_ips else "offline"
+
+        def _short(a):
+            return "." + a.rsplit(".", 1)[-1]
+
+        note = "Один хост с несколькими IP: " + ", ".join(_short(m["ip"]) for m in members)
+        if active_ip:
+            note += "; активный интерфейс: " + _short(active_ip) + "."
+        else:
+            note += "; сейчас ни один интерфейс не отвечает."
+
+        base["ip"] = grp["primary"]
+        base["active_ip"] = active_ip
+        base["ips"] = members
+        base["notes"] = (str(base.get("notes") or "").strip() + " " + note).strip()
+        out.append(base)
+
+    return out
+
+
 def _refresh_status():
     """Пересобирает текущее состояние из данных в data/network_data.py."""
     devices_payload = []
@@ -85,11 +155,11 @@ def _refresh_status():
 
     with _lock:
         latest_status["timestamp"] = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-        latest_status["devices"] = devices_payload
+        latest_status["devices"] = _merge_multi_ip(devices_payload)
         latest_status["alive_icmp"] = alive_icmp
         latest_status["alive_arp"] = alive_arp
         latest_status["offline"] = offline
-        latest_status["summary"] = f"{len(devices_payload)} устройств"
+        latest_status["summary"] = f"{len(latest_status['devices'])} устройств"
 
 
 # ---------- маршруты ----------
@@ -117,10 +187,15 @@ def api_network_info():
 
 
 def _ping(ip):
-    """Пингует один хост, возвращает (ip, alive, rtt)."""
+    """Пингует один хост, возвращает (ip, alive, rtt).
+
+    -c 2 -W 1: две попытки с интервалом ~1 с (итого ≤2 с, как раньше с
+    -c 1 -W 2) — спасает хосты, чей одиночный ICMP-пакет потерялся,
+    не увеличивая общую нагрузку на сеть.
+    """
     try:
         r = subprocess.run(
-            ["ping", "-c", "1", "-W", str(PING_TIMEOUT), ip],
+            ["ping", "-c", "2", "-W", "1", ip],
             capture_output=True, text=True, timeout=PING_TIMEOUT + 2
         )
         if r.returncode == 0:
@@ -237,7 +312,10 @@ def api_network_scan():
         })
 
     # Сортируем по IP
+    alive_addrs = len(results)
     results.sort(key=lambda x: list(map(int, x["ip"].split("."))))
+    # Один хост с несколькими IP (один MAC) — одна карточка с активным интерфейсом
+    results = _merge_multi_ip(results)
 
     elapsed = (datetime.now() - start).total_seconds()
     return jsonify({
@@ -245,11 +323,11 @@ def api_network_scan():
         "subnet": f"{SUBNET}.0/24",
         "mask": nd.NETWORK_MASK,
         "total_hosts": 254,
-        "alive": len(results),
-        "alive_count": len(results),
+        "alive": alive_addrs,
+        "alive_count": alive_addrs,
         "elapsed_sec": round(elapsed, 2),
         "devices": results,
-        "summary": f"Найдено {len(results)} живых устройств за {elapsed:.1f} сек",
+        "summary": f"Найдено {alive_addrs} живых адресов — {len(results)} карточек за {elapsed:.1f} сек",
     })
 
 
@@ -261,6 +339,9 @@ def api_device(ip):
     PUT — ручной сброс статуса (online/offline/warning).
     """
     ip = ip.replace("192.168.1.", "")
+    grp = nd.MULTI_IP_MAP.get("192.168.1." + ip)
+    if grp:
+        ip = grp["primary"].rsplit(".", 1)[-1]  # алиас одного хоста → канонический IP
     for d in nd.DEVICES:
         if d["ip"] == ip:
             full_ip = "192.168.1." + d["ip"]
@@ -278,7 +359,7 @@ def api_device(ip):
                 "sources": d.get("sources", ""),
                 "notes": d.get("notes", ""),
                 "detail_type": d.get("detail_type", "device"),
-                "detail_hint": d.get("detail_hint") or ("http://" + entry["ip"]),
+                "detail_hint": d.get("detail_hint") or ("http://" + full_ip),
                 "last_seen": nd.LATEST_SCAN,
                 "original_note": nd.ORIGINAL_NET_MAP_NOTE,
                 "connection_type": nd.DEVICE_CONNECTION_TYPE.get(full_ip, "unknown"),
@@ -300,12 +381,25 @@ def api_device_services(ip):
     """Список сервисов, обнаруженных на устройстве."""
     ip = ip.replace("192.168.1.", "")
     full_ip = "192.168.1." + ip
+    grp = nd.MULTI_IP_MAP.get(full_ip)
+    if grp:
+        # алиас одного хоста → канонический IP; сервисы берём со всех интерфейсов
+        full_ip = grp["primary"]
+        ip = full_ip.rsplit(".", 1)[-1]
     for d in nd.DEVICES:
         if d["ip"] == ip:
+            services = list(nd.DEVICE_SERVICES.get(full_ip, []))
+            if grp:
+                seen = {(s.get("type"), s.get("port")) for s in services}
+                for alias in grp["aliases"]:
+                    for s in nd.DEVICE_SERVICES.get(alias, []):
+                        if (s.get("type"), s.get("port")) not in seen:
+                            seen.add((s.get("type"), s.get("port")))
+                            services.append(s)
             return jsonify({
                 "ip": full_ip,
                 "name": d["name"],
-                "services": nd.DEVICE_SERVICES.get(full_ip, []),
+                "services": services,
             })
     return jsonify({"error": "device not found"}), 404
 

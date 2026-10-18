@@ -28,10 +28,10 @@ DEVICES = [
      "ping_rtt": "82-187 мс", "ttl": 64, "ports": "80", "sources": "56",
      "notes": "HTTP:80. Широкие RSSI-прыжки 82–187 мс.",
      "detail_type": "web", "detail_hint": "http://192.168.1.20"},
-    {"ip": "23", "name": "MQTT брокер", "mac": "02:07:0A:D9:85:6B",
+    {"ip": "23", "name": "Orange Pi (MQTT брокер)", "mac": "02:07:0A:D9:85:6B",
      "oui": "локальный", "category": "broker", "status": "online",
      "ping_rtt": "64", "ttl": 64, "ports": "80, 22, 445, 1883", "sources": "103, 56",
-     "notes": "orange.local. MQTT:1883, HTTP:80, SSH:22, SMB:445.",
+     "notes": "orange.lan / ORANGE, Debian 13 (OpenSSH_10.0p2). MQTT:1883, HTTP:80 (nginx), SSH:22, SMB:445, DNS:53.",
      "detail_type": "web", "detail_hint": "http://192.168.1.23"},
     {"ip": "50", "name": "Mesh-узел Keenetic", "mac": "50:FF:20:66:75:FF",
      "oui": "Keenetic", "category": "router", "status": "online",
@@ -53,6 +53,12 @@ DEVICES = [
      "ping_rtt": "-", "ttl": "-", "ports": "нет", "sources": "бэкап 13.06.2026",
      "notes": "mDNS: zvuk.local (ESP32-S2 Wi-Fi, ожидает USB-прошивку). Сейчас офлайн.",
      "detail_type": "audio", "detail_hint": "http://192.168.1.76"},
+    {"ip": "91", "name": "NAS / Home Assistant", "mac": "4C:0F:6E:79:45:93",
+     "oui": "Hon Hai Precision (Foxconn)", "category": "server", "status": "online",
+     "ping_rtt": "3-107 мс", "ttl": 56, "ports": "53, 22, 111, 139, 445, 8123, 9000, 9090",
+     "sources": "103",
+     "notes": "HA:8123 (title=Home Assistant), SSH:22 (OpenSSH_9.2p1 Debian), SMB:139/445, DNS:53, RPC:111.",
+     "detail_type": "web", "detail_hint": "http://192.168.1.91:8123"},
     {"ip": "103", "name": "Home Assistant #1 (Wi-Fi->.50)", "mac": "74:2F:68:9D:20:B3",
      "oui": "AzureWave", "category": "server", "status": "online",
      "ping_rtt": "64", "ttl": 64, "ports": "22, 445, 1883, 8123, 8580", "sources": "56",
@@ -73,10 +79,10 @@ DEVICES = [
      "ping_rtt": "-", "ttl": "-", "ports": "нет", "sources": "ARP 14.10",
      "notes": "Портов не найдено, сервисы не обнаружены.",
      "detail_type": "phone", "detail_hint": "http://192.168.1.150"},
-    {"ip": "153", "name": "nginx", "mac": "6C:21:A2:33:DE:6A",
-     "oui": "AMPAK", "category": "web", "status": "online",
+    {"ip": "153", "name": "Orange Pi (2-й IP .23)", "mac": "02:07:0A:D9:85:6B",
+     "oui": "локальный", "category": "web", "status": "online",
      "ping_rtt": "64", "ttl": 64, "ports": "80, 22, 445, 1883", "sources": "103, 56",
-     "notes": "HTTP:80, SSH:22, SMB:445, MQTT:1883.",
+     "notes": "2-й IP того же хоста, что .23 (SSH-хост-ключи совпадают, MAC подтверждён ARP 16.10). nginx:80, SSH:22, SMB:445, MQTT:1883, DNS:53 (PTR: orange.lan).",
      "detail_type": "web", "detail_hint": "http://192.168.1.153"},
     {"ip": "196", "name": "PTZ-камера EYEPLUS/Ginatex", "mac": "BC:2B:02:7C:7F:F0",
      "oui": "China Dragon", "category": "camera", "status": "warning",
@@ -91,7 +97,24 @@ DEVICES = [
      "detail_type": "tv", "detail_hint": "http://192.168.1.219:8009"},
 ]
 
-OFFLINE_NOTES = "Отсутствуют в сети: .42 (HA #2), .60 (Sercomm), .68 (камера), .76 (Ростелеком), .80/.92/.93/.94 (RadMonitor), .96 (Mercusys), .91/.186 (NAS), .220 (Sonoff), .49 (камера #1)."
+# ---------- Группы: один физхост с несколькими IP (один MAC) ----------
+# primary — канонический IP карточки, aliases — остальные IP того же хоста.
+# app.py схлопывает такие карточки в одну и показывает активный интерфейс.
+MULTI_IP_GROUPS = [
+    {"primary": "192.168.1.23", "aliases": ["192.168.1.153"],
+     "mac": "02:07:0A:D9:85:6B",
+     "desc": "Orange Pi (orange.lan, Debian 13): MQTT, nginx, DNS, SSH, SMB"},
+    {"primary": "192.168.1.91", "aliases": ["192.168.1.186"],
+     "mac": "4C:0F:6E:79:45:93",
+     "desc": "NAS / Home Assistant: второй IP .186 обычно офлайн"},
+]
+
+MULTI_IP_MAP = {}
+for _grp in MULTI_IP_GROUPS:
+    for _ip in [_grp["primary"]] + _grp["aliases"]:
+        MULTI_IP_MAP[_ip] = _grp
+
+OFFLINE_NOTES = "Отсутствуют в сети: .42 (HA #2), .60 (Sercomm), .68 (камера), .76 (Ростелеком), .80/.92/.93/.94 (RadMonitor), .96 (Mercusys), .186 (NAS, 2-й IP .91), .220 (Sonoff), .49 (камера #1)."
 
 # Сканер 111.html: hostname и производитель по IP
 SCANNER_DATA = {
@@ -184,6 +207,16 @@ DEVICE_SERVICES = {
         {"name": "Радио \"Звук\"", "type": "http", "port": 80, "url": "http://192.168.1.76",
          "desc": "Управление интернет-радио (mDNS: zvuk.local, сейчас офлайн)"},
     ],
+    "192.168.1.91": [
+        {"name": "Home Assistant", "type": "web", "port": 8123, "url": "http://192.168.1.91:8123",
+         "desc": "Home Assistant (NAS-хост, веб-интерфейс)"},
+        {"name": "SSH", "type": "ssh", "port": 22, "url": "ssh://192.168.1.91",
+         "desc": "Командный доступ (OpenSSH, Debian)"},
+        {"name": "SMB", "type": "smb", "port": 445, "url": "\\\\192.168.1.91",
+         "desc": "Сетевые папки (NAS)"},
+        {"name": "DNS", "type": "dns", "port": 53, "url": "192.168.1.91:53",
+         "desc": "DNS-сервер на NAS"},
+    ],
     "192.168.1.103": [
         {"name": "Home Assistant #1", "type": "web", "port": 8123, "url": "http://192.168.1.103:8123",
          "desc": "Home Assistant контейнер #1"},
@@ -240,6 +273,7 @@ DEVICE_CONNECTION_TYPE = {
     "192.168.1.56": "wired",
     "192.168.1.58": "wired",
     "192.168.1.76": "wifi",
+    "192.168.1.91": "wired",
     "192.168.1.103": "wifi",
     "192.168.1.128": "wifi",
     "192.168.1.142": "wifi",
@@ -257,6 +291,7 @@ CONNECTIONS = [
     {"from": "192.168.1.1", "to": "192.168.1.23", "type": "wired"},
     {"from": "192.168.1.1", "to": "192.168.1.20", "type": "wifi"},
     {"from": "192.168.1.1", "to": "192.168.1.76", "type": "wifi"},
+    {"from": "192.168.1.1", "to": "192.168.1.91", "type": "wired"},
     {"from": "192.168.1.50", "to": "192.168.1.103", "type": "wifi"},
     {"from": "192.168.1.50", "to": "192.168.1.196", "type": "wifi"},
     {"from": "192.168.1.56", "to": "192.168.1.58", "type": "wired"},

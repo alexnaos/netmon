@@ -65,6 +65,13 @@
   .service-url { font-size: 0.75rem; color: #2563eb; margin-left: auto; margin-right: 0.5rem; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; max-width: 150px; }
   .no-services { font-size: 0.8rem; color: #9ca3af; font-style: italic; margin-top: 0.5rem; }
   .conn { font-size: 0.75rem; display: flex; align-items: center; gap: 0.3rem; margin-top: 0.25rem; color: #6b7280; }
+  .ips { display: flex; flex-wrap: wrap; align-items: center; gap: 0.3rem; font-size: 0.78rem; }
+  .ips-label { color: #6b7280; }
+  .ip-chip { display: inline-flex; align-items: center; gap: 0.2rem; padding: 0.05rem 0.45rem; border-radius: 999px; border: 1px solid #e5e7eb; background: #f9fafb; color: #6b7280; font-family: ui-monospace, SFMono-Regular, monospace; }
+  .ip-chip.alive { color: #166534; background: #dcfce7; border-color: #bbf7d0; }
+  .ip-chip.dead { color: #991b1b; background: #fee2e2; border-color: #fecaca; }
+  .ip-chip.active { outline: 2px solid #2563eb; font-weight: 700; }
+  .ips-active { color: #2563eb; font-weight: 600; margin-left: auto; white-space: nowrap; }
   .conn-icon { font-size: 1rem; }
   .conn-icon.wifi { color: #2563eb; }
   .conn-icon.wired { color: #16a34a; }
@@ -311,8 +318,19 @@ function render(data) {
     const ttl = d.ttl !== null && d.ttl !== undefined ? d.ttl : '—';
     const ports = d.ports ? (Array.isArray(d.ports) ? d.ports.join(', ') : String(d.ports)) : '—';
 
+    let ipsRow = '';
+    if (Array.isArray(d.ips) && d.ips.length > 1) {
+      const chips = d.ips.map(m => {
+        const cls = 'ip-chip ' + (m.alive ? 'alive' : 'dead') + (m.ip === d.active_ip ? ' active' : '');
+        return '<span class="' + cls + '" title="' + escapeHtml(m.ip) + '">' +
+               escapeHtml(m.ip.split('.').pop()) + (m.alive ? ' &#10003;' : ' &#10007;') + '</span>';
+      }).join('');
+      ipsRow = '<div class="ips"><span class="ips-label">Интерфейсы:</span>' + chips +
+               '<span class="ips-active">' + (d.active_ip ? '&#9654; ' + escapeHtml(d.active_ip) : 'все офлайн') + '</span></div>';
+    }
     tile.innerHTML = `
       <div class="ip">${escapeHtml(d.ip)}</div>
+      ${ipsRow}
       <div class="mac">${escapeHtml(d.mac || '—')}</div>
       <div class="conn"><span class="conn-icon ${d.connection_type === 'wifi' ? 'wifi' : 'wired'}" title="${d.connection_type === 'wifi' ? 'Wi-Fi' : 'Ethernet'}">${d.connection_type === 'wifi' ? '📶' : '🔌'}</span> ${escapeHtml(d.connection_type === 'wifi' ? 'Wi-Fi' : 'Провод')}</div>
       <div class="category">${escapeHtml(d.category || '—')}</div>
@@ -331,7 +349,7 @@ function render(data) {
   if (data.alive !== undefined && data.elapsed_sec !== undefined) {
     aliveEl.textContent = 'Найдено живых: ' + data.alive + ' из ' + data.total_hosts + ' · ' + data.elapsed_sec + ' сек';
   } else {
-    aliveEl.textContent = 'Устройств: ' + devices.length + (data.alive !== undefined ? ' (живых: ' + data.alive + ')' : '');
+    aliveEl.textContent = 'Устройств: ' + devices.length + (data.alive !== undefined ? ' · живых адресов: ' + data.alive : '');
   }
   if (data.mask) subnetBadge.textContent = data.mask;
 }
@@ -341,6 +359,15 @@ async function openDetail(d, hint) {
   modalTitle.textContent = 'Устройство ' + escapeHtml(d.ip);
   let html = '';
   html += '<div class="kv"><kbd>IP</kbd><span class="val">' + escapeHtml(d.ip) + '</span></div>';
+  if (Array.isArray(d.ips) && d.ips.length > 1) {
+    const ifaceRows = d.ips.map(m => {
+      const rtt = (m.ping_rtt === null || m.ping_rtt === undefined || m.ping_rtt === '-' || m.ping_rtt === '—')
+        ? '' : (typeof m.ping_rtt === 'number' ? ' (' + m.ping_rtt + ' мс)' : ' (' + m.ping_rtt + ')');
+      const st = m.alive ? ('online' + rtt) : 'offline';
+      return escapeHtml(m.ip) + ' — ' + st + (m.ip === d.active_ip ? ' ★ активен' : '');
+    }).join('<br>');
+    html += '<div class="kv"><kbd>Интерфейсы</kbd><span class="val">' + ifaceRows + '</span></div>';
+  }
   if (d.hostname) html += '<div class="kv"><kbd>Имя (сканер)</kbd><span class="val">' + escapeHtml(d.hostname) + '</span></div>';
   if (d.vendor) html += '<div class="kv"><kbd>Производитель</kbd><span class="val">' + escapeHtml(d.vendor) + '</span></div>';
   html += '<div class="kv"><kbd>MAC</kbd><span class="val">' + escapeHtml(d.mac || '—') + '</span></div>';
