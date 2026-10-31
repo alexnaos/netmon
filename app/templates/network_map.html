@@ -109,6 +109,13 @@
   .tree-status.offline { background: #fee2e2; color: #991b1b; }
   .tree-status.warning { background: #fef3c7; color: #92400e; }
   .tree-status.unknown { background: #e5e7eb; color: #374151; }
+  #topology-svg-wrap { flex: 1; background: #f3f4f6; overflow: auto; }
+  #topology-svg { width: 100%; height: 100%; min-height: 400px; }
+  #topology-legend { padding: 0.5rem 1rem; border-bottom: 1px solid #e5e7eb; display: flex; gap: 1rem; flex-wrap: wrap; font-size: 0.8rem; color: #374151; background: #fff; }
+  .legend-line { display: inline-block; width: 24px; height: 3px; vertical-align: middle; margin-right: 4px; }
+  .legend-line.wired { background: #16a34a; }
+  .legend-line.wifi { background: #2563eb; }
+  g.selected circle { stroke: #2563eb; stroke-width: 4; }
 </style>
 </head>
 <body>
@@ -145,9 +152,10 @@
       <h3>Топология сети — дерево устройств</h3>
       <button id="topology-close">&times;</button>
     </div>
-    <div id="topology-tree-wrap">
-      <div id="topology-tree"></div>
-    </div>
+<div id="topology-legend"></div>
+<div id="topology-svg-wrap">
+  <svg id="topology-svg" width="100%" height="100%"></svg>
+</div>
   </div>
 </div>
 
@@ -170,7 +178,7 @@ const btnTopology = document.getElementById('btn-topology');
 const topologyOverlay = document.getElementById('topology-overlay');
 const topologyPanel = document.getElementById('topology-panel');
 const topologyClose = document.getElementById('topology-close');
-const topologyTree = document.getElementById('topology-tree');
+const topologySvg = document.getElementById('topology-svg');
 
 const modal = document.getElementById('modal');
 const modalTitle = document.getElementById('modal-title');
@@ -197,109 +205,153 @@ topologyOverlay.onclick = (e) => { if (e.target === topologyOverlay) topologyOve
 
 function drawTopology(devices, connections) {
   const byIp = {};
-  for (const d of devices) byIp[d.ip] = d;
+  for (const d of (devices || [])) byIp[d.ip] = d;
+  const svg = topologySvg;
+  svg.innerHTML = '';
 
-  // Построить adjacency list из соединений (неориентированный граф)
+  const width = 1000;
+  const height = 600;
+  svg.setAttribute('viewBox', '0 0 ' + width + ' ' + height);
+  svg.setAttribute('preserveAspectRatio', 'xMidYMid meet');
+
+  const NS = 'http://www.w3.org/2000/svg';
   const adj = {};
-  for (const c of connections) {
+  for (const c of (connections || [])) {
     if (!adj[c.from]) adj[c.from] = [];
     if (!adj[c.to]) adj[c.to] = [];
-    adj[c.from].push({ to: c.to, type: c.type || 'wired' });
-    adj[c.to].push({ to: c.from, type: c.type || 'wired' });
+    adj[c.from].push(c.to);
+    adj[c.to].push(c.from);
   }
 
   const rootIp = '192.168.1.1';
-  const visited = new Set();
-
-  // Рекурсивно построить дерево: { ip, children: [{ip, type, children...}] }
-  function buildTree(ip, parentIp) {
-    visited.add(ip);
-    const d = byIp[ip];
-    const children = [];
-    const links = (adj[ip] || []).filter(l => l.to !== parentIp && !visited.has(l.to));
-    for (const link of links) {
-      visited.add(link.to);
-      children.push({
-        ip: link.to,
-        type: link.type || 'wired',
-        children: buildTree(link.to, ip).children
-      });
+  const level = {};
+  const queue = [rootIp];
+  const visited = new Set([rootIp]);
+  level[rootIp] = 0;
+  while (queue.length) {
+    const ip = queue.shift();
+    for (const nb of (adj[ip] || [])) {
+      if (!visited.has(nb)) { visited.add(nb); level[nb] = level[ip] + 1; queue.push(nb); }
     }
-    return { ip, device: d, children };
+  }
+  let maxLevel = 0;
+  for (const v of Object.values(level)) if (v > maxLevel) maxLevel = v;
+  for (const ip of Object.keys(byIp)) {
+    if (level[ip] === undefined) level[ip] = maxLevel + 1;
   }
 
-  const tree = buildTree(rootIp, null);
-
-  // Рендер узла в HTML
-  function renderNode(node, isLast, depth) {
-    const d = node.device;
-    const ip = node.ip;
-    const status = d ? (d.status || 'unknown') : 'unknown';
-    const name = d ? (d.name || ip) : ip;
-    const isRoot = ip === rootIp;
-
-    const connCls = node.type === 'wifi' ? 'wifi' : 'wired';
-    const connIcon = node.type === 'wifi' ? '📶' : '🔌';
-    const statusCls = status === 'online' ? 'online' : (status === 'offline' ? 'offline' : (status === 'warning' ? 'warning' : 'unknown'));
-
-    let html = '';
-    // Connector line prefix (├── or └──)
-    if (!isRoot) {
-      const connector = isLast ? '└── ' : '├── ';
-      html += '<span class="tree-connector">' + connector + '</span>';
-    }
-    // Node
-    const nodeCls = 'tree-node' + (isRoot ? ' root' : '');
-    html += '<div class="' + nodeCls + '" data-ip="' + escapeHtml(ip) + '">';
-    html += (isRoot ? '📡 ' : '') + escapeHtml(name) + ' <span class="ip">' + escapeHtml(ip) + '</span>';
-    if (!isRoot) {
-      html += ' <span class="tree-conn ' + connCls + '"><span class="tree-conn-icon">' + connIcon + '</span>' + (node.type === 'wifi' ? 'Wi-Fi' : 'Провод') + '</span>';
-    }
-    html += ' <span class="tree-status ' + statusCls + '">' + status + '</span>';
-    html += '</div>';
-
-    // Children branch
-    if (node.children && node.children.length > 0) {
-      html += '<div class="tree-branch' + (isLast ? '' : '') + '">';
-      node.children.forEach((child, idx) => {
-        html += renderNode(child, idx === node.children.length - 1, depth + 1);
-      });
-      html += '</div>';
-    }
-
-    return html;
+  const levels = {};
+  for (const ip of Object.keys(byIp)) {
+    const l = level[ip] ?? 0;
+    if (!levels[l]) levels[l] = [];
+    levels[l].push(ip);
   }
-
-  // Собрать всё дерево
-  topologyTree.innerHTML = '';
-  const rootHtml = renderNode(tree, true, 0);
-  // wrap root in branch container for children lines
-  let treeHtml = '<div class="tree-node root" data-ip="' + escapeHtml(tree.ip) + '">';
-  treeHtml += '📡 ' + escapeHtml(tree.device ? (tree.device.name || tree.ip) : tree.ip) + ' <span class="ip">' + escapeHtml(tree.ip) + '</span>';
-  treeHtml += ' <span class="tree-status ' + (tree.device ? (tree.device.status === 'online' ? 'online' : (tree.device.status === 'offline' ? 'offline' : (tree.device.status === 'warning' ? 'warning' : 'unknown'))) : 'unknown') + '">' + escapeHtml(tree.device ? tree.device.status : 'unknown') + '</span>';
-  treeHtml += '</div>';
-  if (tree.children && tree.children.length > 0) {
-    treeHtml += '<div class="tree-branch">';
-    tree.children.forEach((child, idx) => {
-      treeHtml += renderNode(child, idx === tree.children.length - 1, 1);
+  const levelKeys = Object.keys(levels).map(Number).sort((a,b) => a-b);
+  const pos = {};
+  const yGap = 100;
+  const topMargin = 60;
+  levelKeys.forEach((lk, idx) => {
+    const nodes = levels[lk];
+    const n = nodes.length;
+    const xGap = width / (n + 1);
+    nodes.forEach((ip, i) => {
+      pos[ip] = { x: xGap * (i + 1), y: topMargin + idx * yGap };
     });
-    treeHtml += '</div>';
-  }
-  topologyTree.innerHTML = treeHtml;
-
-  // Назначить клики по узлам
-  topologyTree.querySelectorAll('.tree-node').forEach(el => {
-    el.onclick = (e) => {
-      e.stopPropagation();
-      topologyTree.querySelectorAll('.tree-node').forEach(n => n.classList.remove('selected'));
-      el.classList.add('selected');
-      const ip = el.dataset.ip;
-      const d = byIp[ip];
-      setStatus(ip + ' — ' + (d ? (d.name || '') : '') + ' · ' + (d ? (d.connection_type || '—') : '—'));
-    };
   });
-}
 
+  const defs = document.createElementNS(NS, 'defs');
+  function makeMarker(id, color) {
+    const marker = document.createElementNS(NS, 'marker');
+    marker.setAttribute('id', id);
+    marker.setAttribute('markerWidth', '10');
+    marker.setAttribute('markerHeight', '10');
+    marker.setAttribute('refX', '24');
+    marker.setAttribute('refY', '3');
+    marker.setAttribute('orient', 'auto');
+    const path = document.createElementNS(NS, 'path');
+    path.setAttribute('d', 'M0,0 L0,6 L9,3 z');
+    path.setAttribute('fill', color);
+    marker.appendChild(path);
+    return marker;
+  }
+  defs.appendChild(makeMarker('arrowWired', '#16a34a'));
+  defs.appendChild(makeMarker('arrowWifi', '#2563eb'));
+  svg.appendChild(defs);
+
+  for (const c of (connections || [])) {
+    const from = pos[c.from], to = pos[c.to];
+    if (!from || !to) continue;
+    const isWifi = c.type === 'wifi';
+    const line = document.createElementNS(NS, 'line');
+    line.setAttribute('x1', from.x);
+    line.setAttribute('y1', from.y);
+    line.setAttribute('x2', to.x);
+    line.setAttribute('y2', to.y);
+    line.setAttribute('stroke', isWifi ? '#2563eb' : '#16a34a');
+    line.setAttribute('stroke-width', '2');
+    line.setAttribute('marker-end', isWifi ? 'url(#arrowWifi)' : 'url(#arrowWired)');
+    line.style.cursor = 'pointer';
+    const title = document.createElementNS(NS, 'title');
+    title.textContent = c.from + ' \u2194 ' + c.to + ' (' + (isWifi ? 'Wi-Fi' : 'Ethernet') + ')';
+    line.appendChild(title);
+    line.addEventListener('click', () => setStatus(c.from + ' \u2194 ' + c.to + ' \u2014 ' + (isWifi ? 'Wi-Fi' : 'Ethernet')));
+    svg.appendChild(line);
+  }
+
+  for (const ip of Object.keys(pos)) {
+    const d = byIp[ip];
+    const p = pos[ip];
+    const g = document.createElementNS(NS, 'g');
+    g.setAttribute('transform', 'translate(' + p.x + ',' + p.y + ')');
+    g.style.cursor = 'pointer';
+    const status = d ? (d.status || 'unknown') : 'unknown';
+    const color = status === 'online' ? '#16a34a' : (status === 'offline' ? '#ef4444' : (status === 'warning' ? '#ca8a04' : '#9ca3af'));
+    const circle = document.createElementNS(NS, 'circle');
+    circle.setAttribute('r', '22');
+    circle.setAttribute('fill', '#fff');
+    circle.setAttribute('stroke', color);
+    circle.setAttribute('stroke-width', '3');
+    g.appendChild(circle);
+    const icon = document.createElementNS(NS, 'text');
+    icon.setAttribute('text-anchor', 'middle');
+    icon.setAttribute('dominant-baseline', 'central');
+    icon.setAttribute('font-size', '16');
+    icon.textContent = (ip === rootIp) ? '\ud83d\udce1' : ((d && d.connection_type === 'wifi') ? '\ud83d\udcf6' : '\ud83d\udd0c');
+    g.appendChild(icon);
+    const label = document.createElementNS(NS, 'text');
+    label.setAttribute('text-anchor', 'middle');
+    label.setAttribute('y', '38');
+    label.setAttribute('font-size', '11');
+    label.setAttribute('fill', '#111827');
+    const name = d ? (d.name || ip) : ip;
+    label.textContent = (name.length > 18) ? name.slice(0, 16) + '\u2026' : name;
+    g.appendChild(label);
+    const ipLabel = document.createElementNS(NS, 'text');
+    ipLabel.setAttribute('text-anchor', 'middle');
+    ipLabel.setAttribute('y', '52');
+    ipLabel.setAttribute('font-size', '9');
+    ipLabel.setAttribute('fill', '#6b7280');
+    ipLabel.textContent = ip;
+    g.appendChild(ipLabel);
+    const title = document.createElementNS(NS, 'title');
+    title.textContent = name + ' (' + ip + ') \u2014 ' + status;
+    g.appendChild(title);
+    g.addEventListener('click', () => {
+      svg.querySelectorAll('g').forEach(n => n.classList.remove('selected'));
+      g.classList.add('selected');
+      setStatus(ip + ' \u2014 ' + name + ' \u00b7 ' + (d ? (d.connection_type || '\u2014') : '\u2014'));
+      if (d) openDetail(d, d.detail_hint || ('http://' + ip));
+    });
+    svg.appendChild(g);
+  }
+
+  const legend = document.getElementById('topology-legend');
+  if (legend) {
+    legend.innerHTML = '<span><span class="legend-line wired"></span> \u041f\u0440\u043e\u0432\u043e\u0434 (Ethernet)</span>' +
+      '<span><span class="legend-line wifi"></span> Wi-Fi</span>' +
+      '<span>\u0421\u0442\u0430\u0442\u0443\u0441\u044b: <span style="color:#16a34a">\u25cf</span> online <span style="color:#ef4444">\u25cf</span> offline <span style="color:#ca8a04">\u25cf</span> warning</span>';
+  }
+}
 function setStatus(txt) { statusEl.textContent = txt; }
 function escapeHtml(t){ return String(t===''||t==null?'':t).replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":"&#39;"}[c])); }
 function escapeJs(t){ return String(t===''||t==null?'':t).replace(/['\\]/g, '\\$&'); }
@@ -454,13 +506,22 @@ async function fetchInfo() {
 }
 
 async function fullScan() {
-  setStatus('Сканирование сети… (~10 сек)');
+  setStatus('Сканирование сети…');
   try {
-    const r = await fetch(API_SCAN, { method: 'GET', cache: 'no-store' });
-    if (!r.ok) throw new Error('HTTP ' + r.status);
+    await fetch(API_SCAN, { method: 'GET', cache: 'no-store' });
+    let scanning = true;
+    while (scanning) {
+      await new Promise(r => setTimeout(r, 1500));
+      const r = await fetch(API_INFO, { cache: 'no-store' });
+      if (!r.ok) throw new Error('HTTP ' + r.status);
+      const data = await r.json();
+      render(data);
+      scanning = !!data.scanning;
+    }
+    const r = await fetch(API_INFO, { cache: 'no-store' });
     const data = await r.json();
     render(data);
-    setStatus('✅ ' + data.summary + ' · ' + new Date().toLocaleTimeString([], {hour:'2-digit', minute:'2-digit', second:'2-digit'}));
+    setStatus('✅ ' + (data.summary || 'готово') + ' · ' + new Date().toLocaleTimeString([], {hour:'2-digit', minute:'2-digit', second:'2-digit'}));
   } catch (e) {
     setStatus('Ошибка сканирования: ' + escapeHtml(e.message));
   }

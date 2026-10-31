@@ -1,0 +1,341 @@
+{
+  "timestamp": "2026-10-31 12:52:29",
+  "subnet": "192.168.1.0/24",
+  "mask": "255.255.255.0",
+  "devices": [
+    {
+      "ip": "192.168.1.1",
+      "name": "Основной роутер Keenetic",
+      "mac": "54:10:7b:00:22:86",
+      "oui": "Keenetic (Guangdong Jeton)",
+      "category": "router",
+      "status": "online",
+      "ping_rtt": "3.374",
+      "ttl": 64,
+      "ports": "22, 80",
+      "sources": "103, 56",
+      "notes": "HTTP: Web. RTT ~3.374 мс",
+      "detail_type": "router",
+      "detail_hint": "http://192.168.1.1"
+    },
+    {
+      "ip": "192.168.1.23",
+      "name": "Orange Pi (MQTT брокер)",
+      "mac": "02:07:0a:d9:85:6b",
+      "oui": "локальный",
+      "category": "broker",
+      "status": "online",
+      "ping_rtt": "16.887",
+      "ttl": 64,
+      "ports": "22, 80, 445, 1883",
+      "sources": "103, 56",
+      "notes": "HTTP: nginx. RTT ~16.887 мс",
+      "detail_type": "web",
+      "detail_hint": "http://192.168.1.23"
+    },
+    {
+      "ip": "192.168.1.50",
+      "name": "Mesh-узел Keenetic",
+      "mac": "50:ff:20:66:75:ff",
+      "oui": "Keenetic",
+      "category": "router",
+      "status": "online",
+      "ping_rtt": "6.575",
+      "ttl": 64,
+      "ports": "22, 80, 443",
+      "sources": "103, 56",
+      "notes": "HTTP: Web server. RTT ~6.575 мс",
+      "detail_type": "router",
+      "detail_hint": "http://192.168.1.50"
+    },
+    {
+      "ip": "192.168.1.56",
+      "name": "DomSloboda [ТЫ]",
+      "mac": "e8:9c:25:9a:14:d4",
+      "oui": "Realtek",
+      "category": "pc",
+      "status": "online",
+      "ping_rtt": "7.376",
+      "ttl": 128,
+      "ports": "22, 445, 554, 3389",
+      "sources": "103",
+      "notes": "RTT ~7.376 мс",
+      "detail_type": "pc",
+      "detail_hint": "https://192.168.1.56"
+    },
+    {
+      "ip": "192.168.1.58",
+      "name": "Home Assistant #3",
+      "mac": "88:ae:1d:9a:15:a6",
+      "oui": "COMPAL",
+      "category": "server",
+      "status": "online",
+      "ping_rtt": "11.461",
+      "ttl": 64,
+      "ports": "22, 8123",
+      "sources": "103, 56",
+      "notes": "HTTP: X-Frame-Options: SAMEORIGIN. RTT ~11.461 мс",
+      "detail_type": "web",
+      "detail_hint": "http://192.168.1.58:8123"
+    },
+    {
+      "ip": "192.168.1.103",
+      "name": "Сервер (RadMonitor)",
+      "mac": "74:2F:68:9D:20:B3",
+      "oui": "local",
+      "category": "server",
+      "status": "online",
+      "ping_rtt": "0.050",
+      "ttl": 64,
+      "ports": "22, 445, 1883, 8123, 8580",
+      "sources": "56",
+      "notes": "HTTP: X-Frame-Options: SAMEORIGIN. RTT ~0.050 мс",
+      "detail_type": "pc",
+      "detail_hint": "http://192.168.1.103:5000"
+    },
+    {
+      "ip": "192.168.1.142",
+      "name": "Xiaomi",
+      "mac": "7c:d6:61:c1:d9:cf",
+      "oui": "Xiaomi Communications",
+      "category": "control",
+      "status": "online",
+      "ping_rtt": "46.482",
+      "ttl": 64,
+      "ports": "нет",
+      "sources": "ARP.56",
+      "notes": "RTT ~46.482 мс",
+      "detail_type": "control",
+      "detail_hint": "http://192.168.1.142"
+    },
+    {
+      "ip": "192.168.1.153",
+      "name": "Orange Pi (2-й IP .23)",
+      "mac": "02:07:0a:d9:85:6b",
+      "oui": "локальный",
+      "category": "web",
+      "status": "online",
+      "ping_rtt": "19.741",
+      "ttl": 64,
+      "ports": "22, 80, 445, 1883",
+      "sources": "103, 56",
+      "notes": "HTTP: nginx. RTT ~19.741 мс",
+      "detail_type": "web",
+      "detail_hint": "http://192.168.1.153"
+    },
+    {
+      "ip": "192.168.1.196",
+      "name": "PTZ-камера EYEPLUS/Ginatex",
+      "mac": "bc:2b:02:7c:7f:f0",
+      "oui": "China Dragon",
+      "category": "camera",
+      "status": "online",
+      "ping_rtt": "14.335",
+      "ttl": 64,
+      "ports": "80, 554",
+      "sources": "ARP.56",
+      "notes": "HTTP: Ginatex-HTTPServer. RTT ~14.335 мс",
+      "detail_type": "camera",
+      "detail_hint": "http://192.168.1.196"
+    },
+    {
+      "ip": "192.168.1.73",
+      "name": "Устройство 73",
+      "mac": "54:0e:58:8a:90:d5",
+      "oui": "auto",
+      "category": "unknown",
+      "status": "online",
+      "ping_rtt": "297.012",
+      "ttl": "64",
+      "ports": "нет",
+      "sources": "auto-discovery",
+      "notes": "RTT ~297.012 мс",
+      "detail_type": "web",
+      "detail_hint": null
+    },
+    {
+      "ip": "192.168.1.94",
+      "name": "Устройство 94",
+      "mac": "82:9e:46:e1:1d:cd",
+      "oui": "auto",
+      "category": "unknown",
+      "status": "online",
+      "ping_rtt": "55.476",
+      "ttl": "64",
+      "ports": "нет",
+      "sources": "auto-discovery",
+      "notes": "RTT ~55.476 мс",
+      "detail_type": "web",
+      "detail_hint": null
+    },
+    {
+      "ip": "192.168.1.161",
+      "name": "Устройство 161",
+      "mac": "f0:67:28:c2:d4:7b",
+      "oui": "auto",
+      "category": "unknown",
+      "status": "online",
+      "ping_rtt": "246.836",
+      "ttl": "64",
+      "ports": "нет",
+      "sources": "auto-discovery",
+      "notes": "RTT ~246.836 мс",
+      "detail_type": "web",
+      "detail_hint": null
+    },
+    {
+      "ip": "192.168.1.195",
+      "name": "Устройство 195",
+      "mac": "14:da:e9:62:59:c8",
+      "oui": "auto",
+      "category": "pc",
+      "status": "online",
+      "ping_rtt": "8.010",
+      "ttl": "64",
+      "ports": "22, 445, 3389",
+      "sources": "auto-discovery",
+      "notes": "RTT ~8.010 мс",
+      "detail_type": "web",
+      "detail_hint": "http://192.168.1.195:22"
+    },
+    {
+      "ip": "192.168.1.220",
+      "name": "Устройство 220",
+      "mac": "68:fe:71:b2:c2:e8",
+      "oui": "auto",
+      "category": "unknown",
+      "status": "online",
+      "ping_rtt": "107.688",
+      "ttl": "64",
+      "ports": "нет",
+      "sources": "auto-discovery",
+      "notes": "RTT ~107.688 мс",
+      "detail_type": "web",
+      "detail_hint": null
+    },
+    {
+      "ip": "192.168.1.219",
+      "name": "TCL TV",
+      "mac": "38:26:56:d1:ad:5f",
+      "oui": "TCL",
+      "category": "tv",
+      "status": "warning",
+      "ping_rtt": "-",
+      "ttl": "-",
+      "ports": "нет",
+      "sources": "manual",
+      "notes": "Автообнаружение.",
+      "detail_type": "tv",
+      "detail_hint": "http://192.168.1.219:8009"
+    }
+  ],
+  "alive_icmp": [
+    "192.168.1.1",
+    "192.168.1.23",
+    "192.168.1.50",
+    "192.168.1.56",
+    "192.168.1.58",
+    "192.168.1.103",
+    "192.168.1.142",
+    "192.168.1.153",
+    "192.168.1.196",
+    "192.168.1.73",
+    "192.168.1.94",
+    "192.168.1.161",
+    "192.168.1.195",
+    "192.168.1.220"
+  ],
+  "alive_arp": [
+    "192.168.1.1",
+    "192.168.1.23",
+    "192.168.1.50",
+    "192.168.1.56",
+    "192.168.1.58",
+    "192.168.1.103",
+    "192.168.1.142",
+    "192.168.1.153",
+    "192.168.1.196",
+    "192.168.1.73",
+    "192.168.1.94",
+    "192.168.1.161",
+    "192.168.1.195",
+    "192.168.1.220"
+  ],
+  "offline": [
+    "192.168.1.219"
+  ],
+  "note": "Снято 15.10.2026 20:20 при сканировании .103 (Wi-Fi) + .56 (Ethernet). Метод: ICMP-sweep /24 + ARP (обе стороны) + TCP-скан + ping(TTL) + HTTP-пробы + OUI.",
+  "summary": "15 устройств, 14 связей, 14 онлайн",
+  "connections": [
+    {
+      "from": "192.168.1.1",
+      "to": "192.168.1.56",
+      "type": "wired"
+    },
+    {
+      "from": "192.168.1.1",
+      "to": "192.168.1.50",
+      "type": "wired"
+    },
+    {
+      "from": "192.168.1.50",
+      "to": "192.168.1.23",
+      "type": "wired"
+    },
+    {
+      "from": "192.168.1.50",
+      "to": "192.168.1.58",
+      "type": "wired"
+    },
+    {
+      "from": "192.168.1.50",
+      "to": "192.168.1.195",
+      "type": "wired"
+    },
+    {
+      "from": "192.168.1.1",
+      "to": "192.168.1.103",
+      "type": "wifi"
+    },
+    {
+      "from": "192.168.1.1",
+      "to": "192.168.1.142",
+      "type": "wifi"
+    },
+    {
+      "from": "192.168.1.1",
+      "to": "192.168.1.73",
+      "type": "wifi"
+    },
+    {
+      "from": "192.168.1.1",
+      "to": "192.168.1.94",
+      "type": "wifi"
+    },
+    {
+      "from": "192.168.1.50",
+      "to": "192.168.1.196",
+      "type": "wifi"
+    },
+    {
+      "from": "192.168.1.50",
+      "to": "192.168.1.153",
+      "type": "wifi"
+    },
+    {
+      "from": "192.168.1.50",
+      "to": "192.168.1.161",
+      "type": "wifi"
+    },
+    {
+      "from": "192.168.1.50",
+      "to": "192.168.1.220",
+      "type": "wifi"
+    },
+    {
+      "from": "192.168.1.1",
+      "to": "192.168.1.219",
+      "type": "wired"
+    }
+  ]
+}
