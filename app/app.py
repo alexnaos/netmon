@@ -112,34 +112,57 @@ def _normalize_device(d):
 
 
 def _read_raw():
+    # Try to load scan data first, fall back to static DEVICES list
+    data = None
     try:
         with open(SCAN_JSON_PATH, "r", encoding="utf-8") as f:
             data = json.load(f)
     except (FileNotFoundError, json.JSONDecodeError):
-        data = None
-    if not isinstance(data, dict):
-        data = None
-    if data is None:
+        pass
+    
+    if isinstance(data, dict) and "devices" in data:
+        # Use scan data - normalize devices
+        raw_devices = [_normalize_device(d) for d in data.get("devices", [])]
+        merged = _merge_multi_ip(raw_devices)
+        # Add summary info from scan
+        data["devices"] = merged
+        data["total"] = len(data["devices"])
+        data["alive"] = len(data.get("alive_icmp") or []) + len(data.get("alive_arp") or [])
+        data["offline"] = len(data.get("offline") or [])
+        data["scanning"] = data.get("_scan_running", False)
+        return data
+    else:
+        # Fall back to static DEVICES list from network_data.py
         devices = []
         for d in getattr(nd, "DEVICES", []):
             ip = "192.168.1." + str(d["ip"]) if not str(d["ip"]).startswith("192.168.1.") else str(d["ip"])
             devices.append({
                 "ip": ip,
+                "name": (d.get("name") or "Устройство " + ip.rsplit(".", 1)[-1]),
+                "mac": (d.get("mac") or "—"),
+                "oui": (d.get("oui") or ""),
+                "category": (d.get("category") or "unknown"),
+                "status": (d.get("status") or "online"),
+                "ping_rtt": (d.get("ping_rtt") or "—"),
+                "ttl": (d.get("ttl") or 64),
+                "ports": (d.get("ports") or "нет"),
+                "sources": "static-base",
+                "detail_type": "device",
+                "detail_hint": "http://" + ip,
+            }
+        )
+        # Return in the format the API expects
+        return {
+            "devices": devices,
+            "total": len(devices),
+            "alive": len([d for d in devices if d.get("status") not in ("offline", "unknown")]),
+            "offline": len([d for d in devices if d.get("status") == "offline"]),
+            "scanning": False,
+            "subnet": getattr(nd, "SUBNET", "192.168.1.0/24"),
+            "mask": getattr(nd, "NETWORK_MASK", "255.255.255.0"),
+            "_from_fallback": True,
+        }
                 "name": d.get("name"),
-                "mac": d.get("mac"),
-                "category": d.get("category", "unknown"),
-                "status": d.get("status", "unknown"),
-                "ping_rtt": d.get("ping_rtt", "-"),
-                "ttl": d.get("ttl", "-"),
-                "ports": d.get("ports", "нет"),
-                "notes": d.get("notes", ""),
-            })
-        alive_icmp = []
-        alive_arp = []
-        offline = []
-        for d in devices:
-            st = d.get("status", "unknown")
-            if st == "online":
                 alive_icmp.append(d["ip"])
             elif st == "offline":
                 offline.append(d["ip"])
