@@ -6,6 +6,7 @@ import sys
 import json
 import time
 import threading
+import logging
 from datetime import datetime
 
 from flask import Flask, jsonify, render_template, request, send_from_directory
@@ -13,13 +14,21 @@ from flask import Flask, jsonify, render_template, request, send_from_directory
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from data import network_data as nd
 
-SCAN_INTERVAL = 30
+SCAN_INTERVAL = 60
 
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 PROJECT_DIR = os.path.dirname(BASE_DIR)
 STATIC_DIR = os.path.join(BASE_DIR, "static")
 TEMPLATE_DIR = os.path.join(BASE_DIR, "templates")
 SCAN_JSON_PATH = os.path.join(PROJECT_DIR, "data", "network_scan.json")
+LOG_PATH = os.path.join(PROJECT_DIR, "radmonitor.log")
+
+logging.basicConfig(
+    filename=LOG_PATH,
+    level=logging.INFO,
+    format="%(asctime)s %(levelname)s %(threadName)s %(message)s",
+)
+log = logging.getLogger("radmonitor")
 
 app = Flask(__name__,
             template_folder=TEMPLATE_DIR,
@@ -27,6 +36,7 @@ app = Flask(__name__,
 
 _lock = threading.Lock()
 _scan_running = False
+_scan_started = 0.0
 
 
 def _full_ip(ip):
@@ -112,57 +122,34 @@ def _normalize_device(d):
 
 
 def _read_raw():
-    # Try to load scan data first, fall back to static DEVICES list
-    data = None
     try:
         with open(SCAN_JSON_PATH, "r", encoding="utf-8") as f:
             data = json.load(f)
     except (FileNotFoundError, json.JSONDecodeError):
-        pass
-    
-    if isinstance(data, dict) and "devices" in data:
-        # Use scan data - normalize devices
-        raw_devices = [_normalize_device(d) for d in data.get("devices", [])]
-        merged = _merge_multi_ip(raw_devices)
-        # Add summary info from scan
-        data["devices"] = merged
-        data["total"] = len(data["devices"])
-        data["alive"] = len(data.get("alive_icmp") or []) + len(data.get("alive_arp") or [])
-        data["offline"] = len(data.get("offline") or [])
-        data["scanning"] = data.get("_scan_running", False)
-        return data
-    else:
-        # Fall back to static DEVICES list from network_data.py
+        data = None
+    if not isinstance(data, dict):
+        data = None
+    if data is None:
         devices = []
         for d in getattr(nd, "DEVICES", []):
             ip = "192.168.1." + str(d["ip"]) if not str(d["ip"]).startswith("192.168.1.") else str(d["ip"])
             devices.append({
                 "ip": ip,
-                "name": (d.get("name") or "Устройство " + ip.rsplit(".", 1)[-1]),
-                "mac": (d.get("mac") or "—"),
-                "oui": (d.get("oui") or ""),
-                "category": (d.get("category") or "unknown"),
-                "status": (d.get("status") or "online"),
-                "ping_rtt": (d.get("ping_rtt") or "—"),
-                "ttl": (d.get("ttl") or 64),
-                "ports": (d.get("ports") or "нет"),
-                "sources": "static-base",
-                "detail_type": "device",
-                "detail_hint": "http://" + ip,
-            }
-        )
-        # Return in the format the API expects
-        return {
-            "devices": devices,
-            "total": len(devices),
-            "alive": len([d for d in devices if d.get("status") not in ("offline", "unknown")]),
-            "offline": len([d for d in devices if d.get("status") == "offline"]),
-            "scanning": False,
-            "subnet": getattr(nd, "SUBNET", "192.168.1.0/24"),
-            "mask": getattr(nd, "NETWORK_MASK", "255.255.255.0"),
-            "_from_fallback": True,
-        }
                 "name": d.get("name"),
+                "mac": d.get("mac"),
+                "category": d.get("category", "unknown"),
+                "status": d.get("status", "unknown"),
+                "ping_rtt": d.get("ping_rtt", "-"),
+                "ttl": d.get("ttl", "-"),
+                "ports": d.get("ports", "нет"),
+                "notes": d.get("notes", ""),
+            })
+        alive_icmp = []
+        alive_arp = []
+        offline = []
+        for d in devices:
+            st = d.get("status", "unknown")
+            if st == "online":
                 alive_icmp.append(d["ip"])
             elif st == "offline":
                 offline.append(d["ip"])
@@ -200,64 +187,46 @@ def save_scan_data(data):
 
 
 def background_scan():
-    global _scan_running
+    global _scan_running, _scan_started
     while True:
         try:
             _scan_running = True
+            _scan_started = time.time()
             from data import network_discovery as disc
-            devices, connections, alive_icmp, alive_arp, offline, summary = disc.run_discovery()
-            norm_devices = [_normalize_device(d) for d in (devices or [])]
-            payload = {
-                "timestamp": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
-                "subnet": getattr(nd, "SUBNET", "192.168.1.0/24"),
-                "mask": getattr(nd, "NETWORK_MASK", "255.255.255.0"),
-                "devices": norm_devices,
-                "alive_icmp": alive_icmp,
-                "alive_arp": alive_arp,
-                "offline": offline,
-                "note": getattr(nd, "ORIGINAL_NET_MAP_NOTE", ""),
-                "summary": summary,
-                "connections": connections,
-            }
-            save_scan_data(payload)
-            print(f"[RadMonitor] Фоновое сканирование завершено: {summary}")
+            disc.main()
+            data = load_scan_data()
+            summary = data.get("summary", "")
+            elapsed = time.time() - _scan_started
+            log.info("Фоновое сканирование завершено: %s (за %.1f с)", summary, elapsed)
         except Exception as e:
-            print(f"[RadMonitor] Ошибка фонового сканирования: {e}")
+            log.exception("Ошибка фонового сканирования: %s", e)
         finally:
             _scan_running = False
+            _scan_started = 0.0
         time.sleep(SCAN_INTERVAL)
 
 
 def start_background_scanner():
-    t = threading.Thread(target=background_scan, daemon=True)
+    t = threading.Thread(target=background_scan, name="bg-scanner", daemon=True)
     t.start()
 
 
 def run_single_scan():
-    global _scan_running
+    global _scan_running, _scan_started
     try:
         _scan_running = True
+        _scan_started = time.time()
         from data import network_discovery as disc
-        devices, connections, alive_icmp, alive_arp, offline, summary = disc.run_discovery()
-        norm_devices = [_normalize_device(d) for d in (devices or [])]
-        payload = {
-            "timestamp": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
-            "subnet": getattr(nd, "SUBNET", "192.168.1.0/24"),
-            "mask": getattr(nd, "NETWORK_MASK", "255.255.255.0"),
-            "devices": norm_devices,
-            "alive_icmp": alive_icmp,
-            "alive_arp": alive_arp,
-            "offline": offline,
-            "note": getattr(nd, "ORIGINAL_NET_MAP_NOTE", ""),
-            "summary": summary,
-            "connections": connections,
-        }
-        save_scan_data(payload)
-        print(f"[RadMonitor] Ручное сканирование завершено: {summary}")
+        disc.main()
+        data = load_scan_data()
+        summary = data.get("summary", "")
+        elapsed = time.time() - _scan_started
+        log.info("Ручное сканирование завершено: %s (за %.1f с)", summary, elapsed)
     except Exception as e:
-        print(f"[RadMonitor] Ошибка ручного сканирования: {e}")
+        log.exception("Ошибка ручного сканирования: %s", e)
     finally:
         _scan_running = False
+        _scan_started = 0.0
 
 
 @app.route("/")
@@ -277,9 +246,12 @@ def api_network_info():
     raw_devices = [_normalize_device(d) for d in (data.get("devices") or [])]
     data["devices"] = _merge_multi_ip(raw_devices)
     data["total"] = len(data["devices"])
-    data["alive"] = len(data.get("alive_icmp") or []) + len(data.get("alive_arp") or [])
+    alive_icmp = data.get("alive_icmp") or []
+    alive_arp = data.get("alive_arp") or []
+    data["alive"] = len(alive_icmp) if alive_icmp else len(alive_arp)
     data["offline"] = len(data.get("offline") or [])
     data["scanning"] = _scan_running
+    data["scan_started"] = _scan_started
     return jsonify(data)
 
 

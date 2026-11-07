@@ -1,9 +1,17 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """network_discovery.py — автообнаружение устройств."""
-import ast, ipaddress, os, re, socket, subprocess, sys, json
+import ast, ipaddress, os, re, socket, subprocess, sys, json, logging
 from datetime import datetime
 from concurrent.futures import ThreadPoolExecutor, as_completed
+
+LOG_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "radmonitor.log")
+logging.basicConfig(
+    filename=LOG_PATH,
+    level=logging.INFO,
+    format="%(asctime)s %(levelname)s %(threadName)s %(message)s",
+)
+log = logging.getLogger("discovery")
 
 SUBNET = "192.168.1.0/24"
 DATA_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "network_data.py")
@@ -15,12 +23,27 @@ HTTP_TIMEOUT = 2
 MAX_WORKERS = 60
 
 def ping_host(ip):
+    """Проверяет, живо ли устройство.
+    Делает несколько попыток ICMP и, при неудаче, сверяется с ARP-таблицей —
+    чтобы живые устройства не пропускались из-за потери одного пакета."""
+    # 1) ICMP: несколько попыток, считаем живым если прошла хотя бы одна
     try:
-        r = subprocess.run(["ping","-c","1","-W",str(PING_TIMEOUT),ip],
-                           capture_output=True, text=True, timeout=PING_TIMEOUT+2)
-        return r.returncode == 0
+        r = subprocess.run(
+            ["ping", "-c", "3", "-W", "2", ip],
+            capture_output=True, text=True, timeout=8,
+        )
+        if r.returncode == 0:
+            return True
     except Exception:
-        return False
+        pass
+    # 2) Fallback: если в ARP/ip neigh есть актуальная запись с MAC — считаем живым
+    try:
+        mac = get_mac(ip)
+        if mac and mac not in ("", "00:00:00:00:00:00", "incomplete", "__FAILED__"):
+            return True
+    except Exception:
+        pass
+    return False
 
 def get_mac(ip):
     try:
@@ -50,6 +73,34 @@ def scan_port(ip, port):
         return res == 0
     except Exception:
         return False
+
+
+def get_arp_candidates():
+    """Собирает все IP из ARP-таблицы (/proc/net/arp + ip neigh) —
+    потенциальные устройства в сети, даже если не отвечают на ping."""
+    ips = set()
+    # /proc/net/arp
+    try:
+        with open('/proc/net/arp', 'r', encoding='utf-8') as f:
+            for line in f.readlines()[1:]:
+                parts = line.split()
+                if len(parts) >= 4:
+                    ip = parts[0]
+                    mac = parts[3]
+                    if ip and mac not in ("", "00:00:00:00:00:00", "incomplete", "__FAILED__"):
+                        ips.add(ip)
+    except Exception:
+        pass
+    # ip neigh
+    try:
+        r = subprocess.run(['ip', 'neigh', 'show'], capture_output=True, text=True, timeout=5)
+        for line in r.stdout.splitlines():
+            m = re.search(r'((?:\d{1,3}\.){3}\d{1,3})\s+dev\s+\S+\s+lladdr\s+([0-9A-Fa-f:]{17})', line)
+            if m:
+                ips.add(m.group(1))
+    except Exception:
+        pass
+    return sorted(ips)
 
 def http_probe(ip, port):
     try:
@@ -268,74 +319,100 @@ def write_data(path, src, devices, conns, ns):
                 in_devices = in_conns = False
             continue
         out.append(line)
-    with open(path, "w", encoding="utf-8") as f:
+    tmp = path + ".tmp"
+    with open(tmp, "w", encoding="utf-8") as f:
         f.writelines(out)
+    os.replace(tmp, path)
 
 def main():
     if not os.path.exists(DATA_FILE):
-        print("ERROR: not found", DATA_FILE); sys.exit(1)
+        log.error("DATA_FILE не найден: %s", DATA_FILE)
+        sys.exit(1)
     src, ns = read_data(DATA_FILE)
     devices = list(ns.get("DEVICES", []))
-    print(f"=== Discovery {SUBNET} ===\nВ базе: {len(devices)} устройств")
+    log.info("=== Discovery %s ===\nВ базе: %d устройств", SUBNET, len(devices))
 
     mdns = discover_mdns()
-    if mdns: print(f"mDNS имён: {len(mdns)}")
+    if mdns:
+        log.info("mDNS имён: %d", len(mdns))
 
     net = ipaddress.ip_network(SUBNET, strict=False)
     alive = []
-    print("\n[1/4] Ping sweep...")
+    log.info("[1/4] Ping sweep %s ...", SUBNET)
     with ThreadPoolExecutor(max_workers=MAX_WORKERS) as ex:
         futs = {ex.submit(ping_host, str(ip)): str(ip) for ip in net.hosts()}
         for f in as_completed(futs):
-            if f.result(): alive.append(futs[f])
+            if f.result():
+                alive.append(futs[f])
     alive.sort(key=lambda x: [int(o) for o in x.split(".")])
-    print(f"Живых: {len(alive)}")
+    log.info("Живых по ping: %d", len(alive))
 
-    print("\n[2/4] ARP + TCP + HTTP...")
+    # ---------- дополняем кандидатами из ARP-таблицы ----------
+    arp_ips = get_arp_candidates()
+    arp_new = [ip for ip in arp_ips if ip not in alive]
+    if arp_new:
+        log.info("[1b] ARP-кандидаты без ping-ответа: %d", len(arp_new))
+        alive.extend(arp_new)
+        alive.sort(key=lambda x: [int(o) for o in x.split(".")])
+    log.info("Всего кандидатов: %d", len(alive))
+
+    log.info("[2/4] ARP + TCP + HTTP ...")
     disc = []
     for ip in alive:
         ip_short = ip.split(".")[-1]
         mac = get_mac(ip)
         ports = []
-        with ThreadPoolExecutor(max_workers=10) as ex:
-            futs = {ex.submit(scan_port, ip, p): p for p in COMMON_PORTS}
-            for f in as_completed(futs):
-                if f.result(): ports.append(futs[f])
-        ports.sort()
         http = None
-        for p in (80, 8009, 8123, 8580):
-            if p in ports:
-                http = http_probe(ip, p); break
-        rtt = get_rtt(ip)
+        rtt = "-"
+        # Пингуем ещё раз, чтобы получить RTT и уточнить живое ли устройство
+        if ping_host(ip):
+            with ThreadPoolExecutor(max_workers=10) as ex:
+                futs = {ex.submit(scan_port, ip, p): p for p in COMMON_PORTS}
+                for f in as_completed(futs):
+                    if f.result():
+                        ports.append(futs[f])
+            ports.sort()
+            for p in (80, 8009, 8123, 8580):
+                if p in ports:
+                    http = http_probe(ip, p)
+                    break
+            rtt = get_rtt(ip)
+        else:
+            # Устройство есть в ARP, но не отвечает на ping — помечаем warning
+            ports = []
+            rtt = "-"
         disc.append({"ip": ip_short, "mac": mac or "00:00:00:00:00:00",
                      "ports": ports, "http": http, "rtt": rtt, "_full": ip})
-        print(f"  {ip}: MAC={mac} порты={ports} RTT={rtt} HTTP={http}")
+        log.debug("  %s: MAC=%s порты=%s RTT=%s HTTP=%s", ip, mac, ports, rtt, http)
 
-    print("\n[3/4] Сверка с базой...")
+    log.info("[3/4] Сверка с базой...")
     found = {d["ip"] for d in disc}
     for d in devices:
         if str(d["ip"]) not in found:
             d["status"] = "offline"
             d["ports"] = "нет"
             d["ping_rtt"] = "-"
-            print(f"  [!] Офлайн (не отвечает): {d['ip']} — {d.get('name','')}")
+            log.info("  [!] Офлайн (не отвечает): %s — %s", d.get("ip"), d.get("name", ""))
 
     for d in disc:
         ip = d["ip"]; full_ip = d.pop("_full"); ex = find_ip(devices, ip)
-        ports_str = ", ".join(map(str,d["ports"])) if d["ports"] else "нет"
+        ports_str = ", ".join(map(str, d["ports"])) if d["ports"] else "нет"
         status = "online" if d["ports"] or d["rtt"] != "-" else "warning"
         parts = []
-        if d["http"]: parts.append(f"HTTP: {d['http']}")
-        if d["rtt"] != "-": parts.append(f"RTT ~{d['rtt']} мс")
-        if full_ip in mdns: parts.append(f"mDNS: {mdns[full_ip]}.local")
+        if d["http"]:
+            parts.append(f"HTTP: {d['http']}")
+        if d["rtt"] != "-":
+            parts.append(f"RTT ~{d['rtt']} мс")
+        if full_ip in mdns:
+            parts.append(f"mDNS: {mdns[full_ip]}.local")
         notes = ". ".join(parts) if parts else "Автообнаружение."
         if ex:
             ex["status"] = status; ex["ports"] = ports_str
             ex["ping_rtt"] = d["rtt"]; ex["mac"] = d["mac"]
             ex["notes"] = notes
-            if full_ip in mdns and mdns[full_ip] not in ex.get("name",""):
+            if full_ip in mdns and mdns[full_ip] not in ex.get("name", ""):
                 ex["name"] = f"{ex['name']} ({mdns[full_ip]}.local)"
-            print(f"  [~] Обновлено: {ip}")
+            log.info("  [~] Обновлено: %s", ip)
         else:
             name = f"{mdns[full_ip]}.local" if full_ip in mdns else f"Устройство {ip}"
             hint = f"http://{full_ip}" if 80 in d["ports"] else (f"http://{full_ip}:{d['ports'][0]}" if d["ports"] else None)
@@ -344,18 +421,36 @@ def main():
                             "ping_rtt": d["rtt"], "ttl": "64", "ports": ports_str,
                             "sources": "auto-discovery", "notes": notes,
                             "detail_type": "web", "detail_hint": hint})
-            print(f"  [+] Добавлено: {ip} — {name}")
+            log.info("  [+] Добавлено: %s — %s", ip, name)
 
-    print("\n[4/4] Очистка CONNECTIONS...")
+    log.info("[4/4] Очистка CONNECTIONS...")
     valid = {f"192.168.1.{str(d['ip'])}" for d in devices}
     conns = ns.get("CONNECTIONS", [])
     conns = [c for c in conns if str(c["from"]) in valid and str(c["to"]) in valid]
     removed = len(ns.get("CONNECTIONS", [])) - len(conns)
-    if removed: print(f"  Удалено связей: {removed}")
+    if removed:
+        log.info("  Удалено связей: %d", removed)
 
-    print("\n[5/5] Запись network_data.py ...")
+    log.info("[5/5] Запись network_data.py ...")
     write_data(DATA_FILE, src, devices, conns, ns)
-    print(f"Готово. Устройств: {len(devices)}, связей: {len(conns)}")
+    log.info("Готово. Устройств: %d, связей: %d", len(devices), len(conns))
+
+    # ---------- также пишем network_scan.json для Flask ----------
+    alive_icmp = []
+    alive_arp = []
+    offline = []
+    for d in devices:
+        full_ip = "192.168.1." + d["ip"] if not d["ip"].startswith("192.168.1.") else d["ip"]
+        status = d.get("status", "unknown")
+        if status == "online":
+            alive_icmp.append(full_ip)
+            alive_arp.append(full_ip)
+        else:
+            offline.append(full_ip)
+    summary = f"{len(devices)} устройств, {len(conns)} связей, {len(alive_icmp)} онлайн"
+    save_to_json(devices, conns, alive_icmp, alive_arp, offline, summary, ns.get("ORIGINAL_NET_MAP_NOTE", ""))
+    log.info("[Discovery] Сохранено в %s: %s", SCAN_JSON_PATH, summary)
+
 
 if __name__ == "__main__":
-    run_discovery()
+    main()
