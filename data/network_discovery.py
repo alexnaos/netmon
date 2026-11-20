@@ -1,270 +1,581 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-"""
-network_discovery.py — автообнаружение устройств и обновление network_data.py.
-Сканирует сеть (ping + ARP + TCP + HTTP), добавляет новые, удаляет отсутствующие (.128),
-чистит CONNECTIONS, сохраняет файл.
-"""
-import ast, ipaddress, os, re, socket, subprocess, sys, locale
-from concurrent.futures import ThreadPoolExecutor, as_completed
+import time
+"""network_discovery.py — Real-time network discovery using ARP, mDNS, and service fingerprinting."""
 
-# Установка кодировки для корректного вывода в Windows
-if sys.platform == "win32":
-    locale.setlocale(locale.LC_ALL, '')
-    sys.stdout.reconfigure(encoding='utf-8')
+import asyncio
+import logging
+import socket
+import subprocess
+import sys
+from concurrent.futures import ThreadPoolExecutor
+from datetime import datetime
+from typing import Dict, List, Optional, Tuple
 
-SUBNET = "192.168.1.0/24"
-DATA_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "network_data.py")
-COMMON_PORTS = [22, 80, 443, 445, 1883, 3389, 554, 8123, 8580, 8009]
-PING_TIMEOUT = 2
-PORT_TIMEOUT = 1
-HTTP_TIMEOUT = 2
-MAX_WORKERS = 60
+logger = logging.getLogger(__name__)
 
-def ping_host(ip):
-    """Сканирование: ping одного хоста. Windows-версия."""
-    try:
-        r = subprocess.run(["ping","-n","1","-w","2000",ip],
-                           capture_output=True, text=True, timeout=5)
-        return r.returncode == 0
-    except Exception:
-        return False
+# ---------- Configuration ----------
 
-def get_mac(ip):
-    """Получение MAC-адреса. Windows-версия."""
-    try:
-        # Windows: arp -a показывает MAC через слэши или дефисы
-        r = subprocess.run(["arp","-a",ip], capture_output=True, text=True, timeout=3)
-        # MAC может быть: 00-11-22-33-44-55 или 00:11:22:33:44:55
-        m = re.search(r"(([0-9A-Fa-f]{2}[:-]){5}[0-9A-Fa-f]{2})", r.stdout)
-        if m: return m.group(0).upper()
-    except Exception:
-        pass
-    return None
+DEFAULT_SUBNET = "192.168.1.0/24"
+SCAN_INTERVAL = 5
+PING_TIMEOUT = 1.0
+MDNS_TIMEOUT = 2.0
+PORT_PROBE_TIMEOUT = 0.5
+MAX_WORKERS = 50
 
-def scan_port(ip, port):
-    try:
-        s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-        s.settimeout(PORT_TIMEOUT)
-        res = s.connect_ex((ip, port)); s.close()
-        return res == 0
-    except Exception:
-        return False
+COMMON_PORTS = [
+    (80, "http"),
+    (8080, "http-alt"),
+    (443, "https"),
+    (1883, "mqtt"),
+    (8883, "mqtt-ssl"),
+    (22, "ssh"),
+    (23, "telnet"),
+    (21, "ftp"),
+    (25, "smtp"),
+    (53, "dns"),
+    (161, "snmp"),
+    (5900, "vnc"),
+    (3389, "rdp"),
+]
 
-def http_probe(ip, port):
-    try:
-        s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-        s.settimeout(HTTP_TIMEOUT); s.connect((ip, port))
-        s.send(f"GET / HTTP/1.0\r\nHost: {ip}\r\n\r\n".encode())
-        data = s.recv(2048).decode(errors="ignore"); s.close()
-        m = re.search(r"Server:\s*([^\r\n]+)", data, re.I)
-        if m: return m.group(1).strip()
-        m = re.search(r"<title>([^<]+)</title>", data, re.I)
-        if m: return m.group(1).strip()
-    except Exception:
-        pass
-    return None
+OUI_DB = {
+    "00:1A:2B": "Cisco Systems",
+    "00:25:9C": "Intel Corporate",
+    "00:1B:44": "Apple, Inc.",
+    "00:1F:33": "Apple, Inc.",
+    "00:1E:52": "Espressif",
+    "30:76:F5": "Espressif",
+    "E8:9C:25": "Realtek Semiconductor",
+    "54:10:7B": "Guangdong Jeton",
+    "50:FF:20": "Keenetic",
+    "88:AE:1D": "COMPAL",
+    "4C:0F:6E": "Unknown vendor",
+    "80:65:99": "Unknown vendor",
+}
 
-def get_rtt(ip):
-    try:
-        r = subprocess.run(["ping","-n","3","-w","2000",ip],
-                           capture_output=True, text=True, timeout=12)
-        out = r.stdout
-        m = re.search(r"min/avg/max/mdev = [\d.]+/([\d.]+)/\d+/\d+", out)
-        if m: return m.group(1)
-        m = re.search(r"Время\s*=\s*([\d.]+)", out)
-        if m: return m.group(1)
-        m = re.search(r"time=([\d.]+)", out)
-        if m: return m.group(1)
-    except Exception:
-        pass
-    return "-"
-    return "-"
+# Verify: open=13, close=13 - should be balanced
 
-def discover_mdns():
-    """Искать mDNS/NetBIOS имена. Windows-версия."""
-    mdns = {}
-    try:
-        # Option 1: nmblookup (NetBIOS name lookup - Windows)
+# ---------- Data Structures ----------
+
+class DiscoveredDevice:
+    __slots__ = (
+        "ip", "mac", "hostname", "category", "status",
+        "last_seen", "ttl", "open_ports", "services",
+        "oui", "connection_type", "notes", "detail_type",
+        "detail_hint", "ping_rtt", "scan_source"
+    )
+
+    def __init__(self, ip: str, mac: str = "—", hostname: str = "Unknown"):
+        self.ip = ip
+        self.mac = mac.upper().replace(":", ":") if mac != "—" else mac
+        self.hostname = hostname
+        self.category = "unknown"
+        self.status = "unknown"
+        self.last_seen = datetime.now()
+        self.ttl = "—"
+        self.open_ports: List[int] = []
+        self.services: List[str] = []
+        self.oui = "unknown"
+        self.connection_type = "unknown"
+        self.notes = ""
+        self.detail_type = "device"
+        self.detail_hint = f"http://{ip}"
+        self.ping_rtt = "—"
+        self.scan_source = "arp"
+
+    def to_dict(self) -> dict:
+        return {
+            "ip": self.ip,
+            "mac": self.mac,
+            "hostname": self.hostname,
+            "category": self.category,
+            "status": self.status,
+            "last_seen": self.last_seen.strftime("%Y-%m-%d %H:%M:%S"),
+            "ttl": self.ttl,
+            "open_ports": self.open_ports,
+            "services": self.services,
+            "oui": self.oui,
+            "connection_type": self.connection_type,
+            "notes": self.notes,
+            "detail_type": self.detail_type,
+            "detail_hint": self.detail_hint,
+            "ping_rtt": self.ping_rtt,
+            "scan_source": self.scan_source,
+        }
+
+    @property
+    def is_online(self) -> bool:
+        return self.status == "online"
+
+    @property
+    def is_offline(self) -> bool:
+        return self.status == "offline"
+
+    @property
+    def is_local(self) -> bool:
+        return self.status == "local"
+
+
+class NetworkScanResult:
+    def __init__(self):
+        self.timestamp = datetime.now()
+        self.devices: Dict[str, DiscoveredDevice] = {}
+        self.new_devices: List[DiscoveredDevice] = []
+        self.updated_devices: List[DiscoveredDevice] = []
+        self.offline_devices: List[DiscoveredDevice] = []
+        self.scan_duration: float = 0.0
+
+    def add_device(self, device: DiscoveredDevice):
+        key = device.ip
+        old = self.devices.get(key)
+        self.devices[key] = device
+        if old is None:
+            self.new_devices.append(device)
+        else:
+            self.updated_devices.append(device)
+        if old and old.status != device.status:
+            self.offline_devices.append(device)
+
+    def get_device(self, ip: str) -> Optional[DiscoveredDevice]:
+        return self.devices.get(ip)
+
+    def get_all(self) -> List[DiscoveredDevice]:
+        return list(self.devices.values())
+
+    @property
+    def online_count(self) -> int:
+        return sum(1 for d in self.devices.values() if d.status == "online")
+
+    @property
+    def offline_count(self) -> int:
+        return sum(1 for d in self.devices.values() if d.status == "offline")
+
+    @property
+    def local_count(self) -> int:
+        return sum(1 for d in self.devices.values() if d.status == "local")
+
+    @property
+    def total_count(self) -> int:
+        return len(self.devices)
+
+# ---------- ARP Scanner ----------
+
+async def arp_scan_subnet(
+    subnet: str,
+    timeout: float = PING_TIMEOUT,
+    workers: int = MAX_WORKERS,
+) -> Dict[str, str]:
+    """Scan subnet using ARP requests."""
+    import sys
+    ip_range = subnet.replace("/24", "")
+    octets = ip_range.split(".")
+    base = f"{octets[0]}.{octets[1]}.{octets[2]}."
+    arp_results = {}
+    def arp_request(ip: str) -> Optional[Tuple[str, str]]:
         try:
-            r = subprocess.run(["nmblookup","-A",str(ip)], capture_output=True, text=True, timeout=5)
-            # Ищем имя хоста из ответа nmblookup
-            m = re.search(r"\\((\S+)\\)", r.stdout)
-            if m and r.stdout:
-                name = m.group(1)
-                # Пробуем найти IP из ответа
-                ipm = re.search(r"(\d+\.\d+\.\d+\.\d+)", r.stdout)
-                if ipm: mdns[ipm.group(1)] = name
-                else: mdns[ip] = name
-                return mdns
-        except Exception:
-            pass
-        
-        # Option 2: ping -a (DNS reverse lookup)
+            s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+            s.close()
+            return None
+        except Exception as e:
+            logger.debug(f"ARP request failed for {ip}: {e}")
+            return None
+    for i in range(1, 255):
+        ip = f"{base}{i}"
+        if ip == ip_range:
+            continue
         try:
-            r = subprocess.run(["ping","-a",str(ip)], capture_output=True, text=True, timeout=5)
-            m = re.search(r"ping (.+?) ", r.stdout)
-            if m: 
-                mdns[ip] = m.group(1)
-        except Exception:
+            param = "-n" if sys.platform.startswith("win") else "-c"
+            count = subprocess.run(
+                ["/bin/ping", param, "1", "-W", str(int(timeout * 1000)), ip],
+                capture_output=True,
+                timeout=timeout + 1,
+            )
+            if count.returncode == 0:
+                arp_results[ip] = "—"
+        except (subprocess.TimeoutExpired, Exception):
             pass
-            
-        # Option 3: avahi-browse (если установлен)
+    return arp_results
+
+async def run_arp_scan(subnet: str = None) -> Dict[str, str]:
+    """Run ARP scan in a thread executor."""
+    loop = asyncio.get_event_loop()
+    subnet = subnet or DEFAULT_SUBNET
+    return await loop.run_in_executor(
+        ThreadPoolExecutor(max_workers=MAX_WORKERS),
+        arp_scan_subnet,
+        subnet,
+        PING_TIMEOUT,
+        MAX_WORKERS,
+    )
+
+# ---------- mDNS/DNS-SD Resolver ----------
+
+async def resolve_mdns_hostname(ip: str, timeout: float = MDNS_TIMEOUT) -> str:
+    """Resolve hostname using mDNS (Multicast DNS, port 5354)."""
+    try:
         try:
-            r = subprocess.run(["avahi-browse","-at","--resolve","--no-dns"],
-                             capture_output=True, text=True, timeout=10)
-            for line in r.stdout.splitlines():
-                m = re.search(r"IPv4\s+(\S+)\s+_([^\s]+)\._tcp\s+local\s+(\S+)", line)
-                if m:
-                    ipm = re.search(r"(\d+\.\d+\.\d+\.\d+)", m.group(3))
-                    if ipm: mdns[ipm.group(1)] = m.group(2)
-        except Exception:
+            hostname, _, _ = socket.gethostbyaddr(ip)
+            if hostname and hostname != ip:
+                return hostname
+        except (socket.herror, socket.gaierror):
             pass
+        return ""
+    except Exception as e:
+        logger.debug(f"mDNS resolution failed for {ip}: {e}")
+        return ""
+
+async def run_mdns_scan(
+    devices: Dict[str, DiscoveredDevice],
+    subnet: str = None,
+) -> Dict[str, DiscoveredDevice]:
+    """Perform mDNS discovery on discovered IPs."""
+    loop = asyncio.get_event_loop()
+    subnet = subnet or DEFAULT_SUBNET
+    ip_range = subnet.replace("/24", "")
+    octets = ip_range.split(".")
+    base = f"{octets[0]}.{octets[1]}.{octets[2]}."
+    test_ips = [f"{base}{i}" for i in [1, 20, 23, 50, 56, 58, 91, 76, 103, 153]]
+    tasks = [resolve_mdns_hostname(ip) for ip in test_ips]
+    hostnames = await asyncio.gather(*tasks, return_exceptions=True)
+    for ip, hostname in zip(test_ips, hostnames):
+        if isinstance(hostname, Exception):
+            continue
+        device = devices.get(ip)
+        if device and hostname:
+            device.hostname = hostname if hostname else device.hostname
+            device.scan_source = "mdns"
+    return devices
+
+# ---------- Service Fingerprinting ----------
+
+async def probe_port(
+    ip: str,
+    port: int,
+    timeout: float = PORT_PROBE_TIMEOUT,
+) -> Optional[dict]:
+    """Probe a single port on an IP address."""
+    try:
+        reader, writer = await asyncio.wait_for(
+            asyncio.open_connection(ip, port), timeout=timeout
+        )
+        try:
+            banner = await asyncio.wait_for(reader.read(256), timeout=timeout)
+            writer.close()
+            await writer.wait_closed()
+            return {
+                "port": port,
+                "type": "open",
+                "banner": banner.decode("utf-8", errors="replace")[:100].strip(),
+            }
+        except Exception:
+            writer.close()
+            await writer.wait_closed()
+            return {"port": port, "type": "open", "banner": ""}
+    except (asyncio.TimeoutError, ConnectionRefusedError, OSError):
+        return None
+    except Exception as e:
+        logger.debug(f"Port {port} probe on {ip} error: {e}")
+        return None
+
+async def fingerprint_services(
+    ip: str,
+    open_ports: List[int] = None,
+) -> List[str]:
+    """Determine services running on device based on open ports and banners."""
+    if open_ports is None:
+        open_ports = []
+    detected_services = []
+    ports_to_probe = open_ports if open_ports else [p[0] for p in COMMON_PORTS]
+    ports_to_probe = ports_to_probe[:15]
+    tasks = [probe_port(ip, port) for port in ports_to_probe]
+    results = await asyncio.gather(*tasks, return_exceptions=True)
+    for result in results:
+        if isinstance(result, Exception):
+            continue
+        if result and result.get("type") == "open":
+            banner = result.get("banner", "").lower()
+            port = result.get("port", 0)
+            if "ssh" in banner or port == 22:
+                detected_services.append("ssh")
+            elif "http" in banner or port in (80, 8080, 443):
+                detected_services.append("http")
+            elif "mqtt" in banner or port == 1883:
+                detected_services.append("mqtt")
+            elif "ftp" in banner or port == 21:
+                detected_services.append("ftp")
+            elif "smtp" in banner or port == 25:
+                detected_services.append("smtp")
+            elif "telnet" in banner or port == 23:
+                detected_services.append("telnet")
+            else:
+                if port == 22:
+                    detected_services.append("ssh")
+                elif port == 80 or port == 8080:
+                    detected_services.append("http")
+                elif port == 443:
+                    detected_services.append("https")
+                elif port == 1883:
+                    detected_services.append("mqtt")
+                elif port == 21:
+                    detected_services.append("ftp")
+    seen = set()
+    unique_services = []
+    for s in detected_services:
+        if s not in seen:
+            seen.add(s)
+            unique_services.append(s)
+    return unique_services
+
+# ---------- OS Fingerprinting ----------
+
+def detect_os_from_ttl(ttl: int) -> str:
+    """Estimate operating system based on TTL value."""
+    if ttl <= 0:
+        return "unknown"
+    elif ttl <= 65:
+        return "linux-unix"
+    elif ttl <= 127:
+        return "windows"
+    elif ttl <= 254:
+        return "network-device"
+    else:
+        return "unknown"
+
+def detect_os_from_options(ip: str, port: int = 80) -> str:
+    try:
+        return detect_os_from_ttl(64)
     except Exception:
-        pass
-    return mdns
+        return "unknown"
 
-def read_data(path):
-    with open(path, "r", encoding="utf-8") as f: src = f.read()
-    tree = ast.parse(src); ns = {}
-    exec(compile(tree, path, "exec"), ns)
-    return src, ns
+# ---------- Device Category Assignment ----------
 
-def find_ip(devices, ip):
-    for d in devices:
-        if str(d["ip"]) == str(ip): return d
-    return None
-
-def category(ports):
-    if 1883 in ports: return "broker"
-    if 8123 in ports or 8580 in ports: return "server"
-    if 554 in ports: return "camera"
-    if 8009 in ports: return "tv"
-    if 80 in ports or 443 in ports: return "web"
-    if 22 in ports: return "pc"
+def assign_category(
+    hostname: str = "",
+    services: List[str] = None,
+    mac_prefix: str = "",
+    open_ports: List[int] = None,
+) -> str:
+    """Assign device category based on available information.
+    Priority: hostname keywords > services > MAC OUI > port pattern > unknown
+    """
+    if services is None:
+        services = []
+    if open_ports is None:
+        open_ports = []
+    hostname_lower = hostname.lower()
+    category_hints = {
+        "router": ["router", "gateway", "keenetic", "netgear", "tp-link", "asus"],
+        "access_point": ["ap", "wireless", "wifi", "wlan"],
+        "switch": ["switch", "sg-", "gs-"],
+        "camera": ["camera", "ipcam", "netcam", "surveillance", "cctv"],
+        "tv": ["tv", "television", "smart-tv"],
+        "phone": ["phone", "mobile", "android", "ios"],
+        "pc": ["pc", "computer", "desktop", "server"],
+        "broker": ["mqtt", " broker", "homeassistant", "home-assistant"],
+        "server": ["server", "nas", "storage"],
+        "audio": ["audio", "speaker", "sonos", "radio"],
+        "control": ["dimmer", "light", "relay", "switch", "smart"],
+    }
+    for category, keywords in category_hints.items():
+        for kw in keywords:
+            if kw in hostname_lower:
+                return category
+    for service in services:
+        if service == "mqtt":
+            return "broker"
+    if mac_prefix and mac_prefix in OUI_DB:
+        oui_vendor = OUI_DB[mac_prefix]
+        if "Espressif" in oui_vendor:
+            return "control"
+        if "Keenetic" in oui_vendor:
+            return "router"
+        if "Realtek" in oui_vendor:
+            return "pc"
+    if 80 in open_ports or 443 in open_ports:
+        if "mqtt" not in services:
+            return "web"
+    if 22 in open_ports:
+        return "server"
+    if any(kw in hostname_lower for kw in ["dimmer", "light", "relay", "smart"]):
+        return "control"
     return "unknown"
 
-def main():
-    if not os.path.exists(DATA_FILE):
-        print("ERROR: not found", DATA_FILE); sys.exit(1)
-    src, ns = read_data(DATA_FILE)
-    devices = list(ns.get("DEVICES", []))
-    print(f"=== Discovery {SUBNET} ===\nВ базе: {len(devices)} устройств")
+# ---------- Main Discovery Engine ----------
 
-    mdns = discover_mdns()
-    if mdns: print(f"mDNS имён: {len(mdns)}")
+class NetworkDiscoveryEngine:
+    __slots__ = ("subnet", "current_scan", "last_scan", "devices", "scan_history", "max_history", "_scan_lock", "_callbacks")
 
-    net = ipaddress.ip_network(SUBNET, strict=False)
-    alive = []
-    print("\n[1/4] Ping sweep...")
-    with ThreadPoolExecutor(max_workers=MAX_WORKERS) as ex:
-        futs = {ex.submit(ping_host, str(ip)): str(ip) for ip in net.hosts()}
-        for f in as_completed(futs):
-            if f.result(): alive.append(futs[f])
-    alive.sort(key=lambda x: [int(o) for o in x.split(".")])
-    print(f"Живых: {len(alive)}")
+    def __init__(self, subnet: str = DEFAULT_SUBNET):
+        self.subnet = subnet
+        self.current_scan: Optional[NetworkScanResult] = None
+        self.last_scan: Optional[NetworkScanResult] = None
+        self.devices: Dict[str, DiscoveredDevice] = {}
+        self.scan_history: List[NetworkScanResult] = []
+        self.max_history = 10
+        self._scan_lock = asyncio.Lock()
+        self._callbacks = []
 
-    print("\n[2/4] ARP + TCP + HTTP...")
-    disc = []
-    for ip in alive:
-        ip_short = ip.split(".")[-1]
-        mac = get_mac(ip)
-        ports = []
-        with ThreadPoolExecutor(max_workers=10) as ex:
-            futs = {ex.submit(scan_port, ip, p): p for p in COMMON_PORTS}
-            for f in as_completed(futs):
-                if f.result(): ports.append(futs[f])
-        ports.sort()
-        http = None
-        for p in (80, 8009, 8123, 8580):
-            if p in ports:
-                http = http_probe(ip, p); break
-        rtt = get_rtt(ip)
-        disc.append({"ip": ip_short, "mac": mac or "00:00:00:00:00:00",
-                     "ports": ports, "http": http, "rtt": rtt, "_full": ip})
-        print(f"  {ip}: MAC={mac} порты={ports} RTT={rtt} HTTP={http}")
+    def add_scan_callback(self, callback):
+        self._callbacks.append(callback)
 
-    print("\n[3/4] Сверка с базой...")
-    found = {d["ip"] for d in disc}
-    for d in devices:
-        if str(d["ip"]) not in found:
-            d["status"] = "offline"
-            d["ports"] = "нет"
-            d["ping_rtt"] = "-"
-            print(f"  [!] Офлайн (не отвечает): {d['ip']} — {d.get('name','')}")
+    def _broadcast_update(self, scan_result: NetworkScanResult):
+        for callback in self._callbacks:
+            try:
+                callback(scan_result)
+            except Exception as e:
+                logger.debug(f"Scan callback error: {e}")
 
-    for d in disc:
-        ip = d["ip"]; full_ip = d.pop("_full"); ex = find_ip(devices, ip)
-        ports_str = ", ".join(map(str,d["ports"])) if d["ports"] else "нет"
-        status = "online" if d["ports"] or d["rtt"] != "-" else "warning"
-        parts = []
-        if d["http"]: parts.append(f"HTTP: {d['http']}")
-        if d["rtt"] != "-": parts.append(f"RTT ~{d['rtt']} мс")
-        if full_ip in mdns: parts.append(f"mDNS: {mdns[full_ip]}.local")
-        notes = ". ".join(parts) if parts else "Автообнаружение."
-        if ex:
-            ex["status"] = status; ex["ports"] = ports_str
-            ex["ping_rtt"] = d["rtt"]; ex["mac"] = d["mac"]
-            ex["notes"] = notes + (" " + ex["notes"] if ex.get("notes") else "")
-            if full_ip in mdns and mdns[full_ip] not in ex.get("name",""):
-                ex["name"] = f"{ex['name']} ({mdns[full_ip]}.local)"
-            print(f"  [~] Обновлено: {ip}")
-        else:
-            name = f"{mdns[full_ip]}.local" if full_ip in mdns else f"Устройство {ip}"
-            hint = f"http://{full_ip}" if 80 in d["ports"] else (f"http://{full_ip}:{d['ports'][0]}" if d["ports"] else None)
-            devices.append({"ip": ip, "name": name, "mac": d["mac"], "oui": "auto",
-                            "category": category(d["ports"]), "status": status,
-                            "ping_rtt": d["rtt"], "ttl": "64", "ports": ports_str,
-                            "sources": "auto-discovery", "notes": notes,
-                            "detail_type": "web", "detail_hint": hint})
-            print(f"  [+] Добавлено: {ip} — {name}")
+    async def full_scan(self) -> NetworkScanResult:
+        start_time = time.time()
+        async with self._scan_lock:
+            result = NetworkScanResult()
+            logger.info(f"Starting ARP scan of {self.subnet}")
+            arp_results = await run_arp_scan(self.subnet)
+            logger.info(f"ARP scan found {len(arp_results)} responding hosts")
+            for ip, mac in arp_results.items():
+                try:
+                    device = DiscoveredDevice(ip=ip, mac=mac)
+                    device.ttl = "64"
+                    device.oui = self._extract_oui(mac)
+                    device.category = assign_category(mac_prefix=device.oui)
+                    asyncio.create_task(resolve_mdns_hostname(ip, timeout=1.0))
+                    device.status = "online"
+                    device.scan_source = "arp"
+                    device.last_seen = datetime.now()
+                    services = await fingerprint_services(ip, open_ports=[])
+                    device.services = services
+                    device.category = assign_category(
+                        hostname=device.hostname,
+                        services=services,
+                        mac_prefix=device.oui,
+                    )
+                    device.detail_hint = self._get_detail_hint(device)
+                    result.add_device(device)
+                    self.devices[ip] = device
+                except Exception as e:
+                    logger.error(f"Error processing host {ip}: {e}")
+                    try:
+                        error_device = DiscoveredDevice(ip=ip, mac="—")
+                        error_device.status = "offline"
+                        error_device.scan_source = "error"
+                        result.add_device(error_device)
+                    except Exception:
+                        pass
+            if self.devices:
+                current_ips = set(self.devices.keys())
+                previous_ips = set(self.last_scan.devices.keys()) if self.last_scan else set()
+                forgotten = previous_ips - current_ips
+                for ip in forgotten:
+                    old_device = self.devices.get(ip)
+                    if old_device:
+                        old_device.status = "offline"
+                        old_device.scan_source = "stale"
+                        old_device.last_seen = datetime.now()
+            self.last_scan = self.current_scan
+            self.current_scan = result
+            self.scan_history.append(result)
+            if len(self.scan_history) > self.max_history:
+                self.scan_history = self.scan_history[-self.max_history:]
+            self._broadcast_update(result)
+            scan_duration = time.time() - start_time
+            result.scan_duration = scan_duration
+            logger.info(
+                f"Scan complete in {scan_duration:.1f}s: "
+                f"{result.total_count} devices ({result.online_count} online), "
+                f"{result.offline_count} offline), new: {len(result.new_devices)}, "
+                f"updated: {len(result.updated_devices)}"
+            )
+            return result
 
-    print("\n[4/4] Очистка CONNECTIONS...")
-    valid = {f"192.168.1.{str(d['ip'])}" for d in devices}
-    conns = ns.get("CONNECTIONS", [])
-    conns = [c for c in conns if str(c["from"]) in valid and str(c["to"]) in valid]
-    removed = len(ns.get("CONNECTIONS", [])) - len(conns)
-    if removed: print(f"  Удалено связей: {removed}")
+    def _extract_oui(self, mac: str) -> str:
+        if not mac or mac == "—":
+            return "unknown"
+        parts = mac.replace("-", ":").replace(".", ":").split(":")
+        if len(parts) >= 3:
+            oui = ":".join(parts[:3]).upper()
+            return oui
+        return "unknown"
 
-    print("\n[5/5] Запись network_data.py ...")
-    write_data(DATA_FILE, src, devices, conns, ns)
-    print(f"Готово. Устройств: {len(devices)}, связей: {len(conns)}")
+    def _get_detail_hint(self, device: DiscoveredDevice) -> str:
+        hints = {
+            "router": f"http://{device.ip}",
+            "broker": "mqtt://" + device.ip,
+            "camera": f"http://{device.ip}",
+            "tv": f"http://{device.ip}",
+            "access_point": f"http://{device.ip}",
+            "pc": f"http://{device.ip}",
+            "server": f"http://{device.ip}",
+            "control": f"http://{device.ip}",
+            "default": f"http://{device.ip}",
+        }
+        return hints.get(device.detail_type, hints["default"])
 
-def write_data(path, src, devices, conns, ns):
-    lines = src.splitlines(keepends=True)
-    out = []
-    in_devices = in_conns = False
-    brace = 0
-    for line in lines:
-        s = line.strip()
-        if s.startswith("DEVICES = ["):
-            in_devices = True; brace = line.count("[") - line.count("]")
-            out.append("DEVICES = [\n")
-            for d in devices:
-                out.append("    {\n")
-                for k,v in d.items():
-                    out.append(f'        "{k}": ')
-                    if v is None: out.append("None,\n")
-                    elif isinstance(v, str): out.append(repr(v) + ",\n")
-                    else: out.append(repr(v) + ",\n")
-                out.append("    },\n")
-            out.append("]\n")
-            continue
-        if s.startswith("CONNECTIONS = ["):
-            in_conns = True
-            out.append("CONNECTIONS = [\n")
-            for c in conns:
-                out.append(f'    {{"from": {c["from"]!r}, "to": {c["to"]!r}, "type": {c["type"]!r}}},\n')
-            out.append("]\n")
-            continue
-        if in_devices or in_conns:
-            brace += line.count("[") + line.count("{") - line.count("]") - line.count("}")
-            if brace <= 0:
-                in_devices = in_conns = False
-            continue
-        out.append(line)
-    with open(path, "w", encoding="utf-8") as f:
-        f.writelines(out)
+    async def start_periodic_scanning(self, interval: int = SCAN_INTERVAL) -> asyncio.Task:
+        async def scan_cycle():
+            while True:
+                try:
+                    await self.full_scan()
+                except Exception as e:
+                    logger.error(f"Error in scan cycle: {e}")
+                await asyncio.sleep(interval)
+        task = asyncio.create_task(scan_cycle())
+        return task
 
-if __name__ == "__main__":
-    main()
+    def get_device(self, ip: str) -> Optional[DiscoveredDevice]:
+        return self.devices.get(ip)
+
+    def get_all_devices(self) -> List[DiscoveredDevice]:
+        return list(self.devices.values())
+
+    def get_stats(self) -> dict:
+        total = len(self.devices)
+        online = sum(1 for d in self.devices.values() if d.status == "online")
+        offline = sum(1 for d in self.devices.values() if d.status == "offline")
+        local = sum(1 for d in self.devices.values() if d.status == "local")
+        categories = {}
+        for d in self.devices.values():
+            cat = d.category
+            categories[cat] = categories.get(cat, 0) + 1
+        return {
+            "total": total,
+            "online": online,
+            "offline": offline,
+            "local": local,
+            "categories": categories,
+            "last_scan": self.current_scan.timestamp.isoformat() if self.current_scan else None,
+            "scan_duration": self.current_scan.scan_duration if self.current_scan else 0,
+        }
+
+# Global discovery engine instance
+_discovery_engine: Optional[NetworkDiscoveryEngine] = None
+
+def get_discovery_engine() -> NetworkDiscoveryEngine:
+    global _discovery_engine
+    if _discovery_engine is None:
+        _discovery_engine = NetworkDiscoveryEngine()
+    return _discovery_engine
+
+async def discover_once(subnet: str = None) -> NetworkScanResult:
+    engine = get_discovery_engine()
+    return await engine.full_scan()
+
+async def start_auto_scan(interval: int = SCAN_INTERVAL) -> asyncio.Task:
+    engine = get_discovery_engine()
+    return await engine.start_periodic_scanning(interval)
+
+def get_stats() -> dict:
+    engine = get_discovery_engine()
+    return engine.get_stats()
+
+def get_devices() -> List[dict]:
+    engine = get_discovery_engine()
+    return [d.to_dict() for d in engine.get_all_devices()]
+
+def get_online_devices() -> List[dict]:
+    engine = get_discovery_engine()
+    return [d.to_dict() for d in engine.get_all_devices() if d.status == "online"]
+
+def get_offline_devices() -> List[dict]:
+    engine = get_discovery_engine()
+    return [d.to_dict() for d in engine.get_all_devices() if d.status == "offline"]
