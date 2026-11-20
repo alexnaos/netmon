@@ -5,8 +5,13 @@ network_discovery.py — автообнаружение устройств и о
 Сканирует сеть (ping + ARP + TCP + HTTP), добавляет новые, удаляет отсутствующие (.128),
 чистит CONNECTIONS, сохраняет файл.
 """
-import ast, ipaddress, os, re, socket, subprocess, sys
+import ast, ipaddress, os, re, socket, subprocess, sys, locale
 from concurrent.futures import ThreadPoolExecutor, as_completed
+
+# Установка кодировки для корректного вывода в Windows
+if sys.platform == "win32":
+    locale.setlocale(locale.LC_ALL, '')
+    sys.stdout.reconfigure(encoding='utf-8')
 
 SUBNET = "192.168.1.0/24"
 DATA_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "network_data.py")
@@ -17,20 +22,25 @@ HTTP_TIMEOUT = 2
 MAX_WORKERS = 60
 
 def ping_host(ip):
+    """Сканирование: ping одного хоста. Windows-версия."""
     try:
-        r = subprocess.run(["ping","-c","1","-W",str(PING_TIMEOUT),ip],
-                           capture_output=True, text=True, timeout=PING_TIMEOUT+2)
+        r = subprocess.run(["ping","-n","1","-w","2000",ip],
+                           capture_output=True, text=True, timeout=5)
         return r.returncode == 0
     except Exception:
         return False
 
 def get_mac(ip):
+    """Получение MAC-адреса. Windows-версия."""
     try:
-        r = subprocess.run(["arp","-n",ip], capture_output=True, text=True, timeout=3)
+        # Windows: arp -a показывает MAC через слэши или дефисы
+        r = subprocess.run(["arp","-a",ip], capture_output=True, text=True, timeout=3)
+        # MAC может быть: 00-11-22-33-44-55 или 00:11:22:33:44:55
         m = re.search(r"(([0-9A-Fa-f]{2}[:-]){5}[0-9A-Fa-f]{2})", r.stdout)
-        return m.group(0) if m else None
+        if m: return m.group(0).upper()
     except Exception:
-        return None
+        pass
+    return None
 
 def scan_port(ip, port):
     try:
@@ -57,27 +67,59 @@ def http_probe(ip, port):
 
 def get_rtt(ip):
     try:
-        r = subprocess.run(["ping","-c","3","-W",str(PING_TIMEOUT),ip],
-                           capture_output=True, text=True, timeout=PING_TIMEOUT*4)
+        r = subprocess.run(["ping","-n","3","-w","2000",ip],
+                           capture_output=True, text=True, timeout=12)
         out = r.stdout
-        m = re.search(r"min/avg/max/mdev = [\d.]+/([\d.]+)/", out)
+        m = re.search(r"min/avg/max/mdev = [\d.]+/([\d.]+)/\d+/\d+", out)
         if m: return m.group(1)
-        m = re.search(r"time=([\d.]+)\s*ms", out)
+        m = re.search(r"Время\s*=\s*([\d.]+)", out)
+        if m: return m.group(1)
+        m = re.search(r"time=([\d.]+)", out)
         if m: return m.group(1)
     except Exception:
         pass
     return "-"
+    return "-"
 
 def discover_mdns():
+    """Искать mDNS/NetBIOS имена. Windows-версия."""
     mdns = {}
     try:
-        r = subprocess.run(["avahi-browse","-at","--resolve","--no-dns"],
-                           capture_output=True, text=True, timeout=10)
-        for line in r.stdout.splitlines():
-            m = re.search(r"IPv4\s+(\S+)\s+_([^\s]+)\._tcp\s+local\s+(\S+)", line)
-            if m:
-                ipm = re.search(r"(\d+\.\d+\.\d+\.\d+)", m.group(3))
-                if ipm: mdns[ipm.group(1)] = m.group(2)
+        # Option 1: nmblookup (NetBIOS name lookup - Windows)
+        try:
+            r = subprocess.run(["nmblookup","-A",str(ip)], capture_output=True, text=True, timeout=5)
+            # Ищем имя хоста из ответа nmblookup
+            m = re.search(r"\\((\S+)\\)", r.stdout)
+            if m and r.stdout:
+                name = m.group(1)
+                # Пробуем найти IP из ответа
+                ipm = re.search(r"(\d+\.\d+\.\d+\.\d+)", r.stdout)
+                if ipm: mdns[ipm.group(1)] = name
+                else: mdns[ip] = name
+                return mdns
+        except Exception:
+            pass
+        
+        # Option 2: ping -a (DNS reverse lookup)
+        try:
+            r = subprocess.run(["ping","-a",str(ip)], capture_output=True, text=True, timeout=5)
+            m = re.search(r"ping (.+?) ", r.stdout)
+            if m: 
+                mdns[ip] = m.group(1)
+        except Exception:
+            pass
+            
+        # Option 3: avahi-browse (если установлен)
+        try:
+            r = subprocess.run(["avahi-browse","-at","--resolve","--no-dns"],
+                             capture_output=True, text=True, timeout=10)
+            for line in r.stdout.splitlines():
+                m = re.search(r"IPv4\s+(\S+)\s+_([^\s]+)\._tcp\s+local\s+(\S+)", line)
+                if m:
+                    ipm = re.search(r"(\d+\.\d+\.\d+\.\d+)", m.group(3))
+                    if ipm: mdns[ipm.group(1)] = m.group(2)
+        except Exception:
+            pass
     except Exception:
         pass
     return mdns

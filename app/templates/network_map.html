@@ -329,7 +329,14 @@ function render(data) {
   }
 
   if (data.alive !== undefined && data.elapsed_sec !== undefined) {
-    aliveEl.textContent = 'Найдено живых: ' + data.alive + ' из ' + data.total_hosts + ' · ' + data.elapsed_sec + ' сек';
+    # Show alive from /api/network/info (18 devices with MAC/ports)
+    # And also show reachable from /api/network/scan if available
+    if (data.reachable !== undefined) {
+      aliveEl.textContent = 'Отвечают на ping: ' + data.reachable + ' из ' + data.total_hosts + ' 00b7 ' + data.elapsed_sec + ' сек';
+    } else {
+      # Initial load from /api/network/info
+      aliveEl.textContent = 'Устройств: ' + devices.length + ' (ответов на ping: ' + data.alive + ')';
+    }
   } else {
     aliveEl.textContent = 'Устройств: ' + devices.length + (data.alive !== undefined ? ' (живых: ' + data.alive + ')' : '');
   }
